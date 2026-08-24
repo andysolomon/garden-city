@@ -29,6 +29,11 @@ ES modules require an HTTP server (opening `index.html` via `file://` won't work
 - `antitecture.html` — original single-file poster generator (legacy, kept as reference)
 - `procedural-city-v1.html` — first model/renderer split prototype (legacy)
 
+## Roadmap
+
+- [V2: The Road Graph](docs/V2-ROAD-GRAPH.md) — replacing rectangular
+  subdivision with a planar road graph (proposed, not started)
+
 ## Design rules
 
 - `generateCity()` never touches three.js. Renderers never decide layout.
