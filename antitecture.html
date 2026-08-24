@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Generative Antitecture — RDS System</title>
+<style>
+  body { margin: 0; background: #111; color: #ccc; font-family: "Courier New", monospace; overflow: hidden; }
+  #hdr { position: fixed; top: 0; left: 0; right: 0; padding: 14px 20px; display: flex; justify-content: space-between; letter-spacing: 3px; font-size: 12px; z-index: 2; }
+  #hdr .sub { color: #777; font-size: 10px; letter-spacing: 2px; }
+  #wrap { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { box-shadow: 0 0 60px #000; max-height: 88vh; max-width: 92vw; }
+  #bar { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 2; }
+  button { background: #1a1a1a; color: #ccc; border: 1px solid #333; padding: 12px 28px; font-family: inherit; letter-spacing: 3px; font-size: 11px; cursor: pointer; }
+  button:hover { background: #2a2a2a; }
+  button.primary { background: #ddd8ce; color: #111; border-color: #ddd8ce; }
+</style>
+</head>
+<body>
+<div id="hdr">
+  <div>GENERATIVE ANTITECTURE<div class="sub">RDS SYSTEM v14.2</div></div>
+  <div id="tag"></div>
+</div>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="bar">
+  <button onclick="gen()" class="primary">GENERATE</button>
+  <button onclick="save()">SAVE PNG</button>
+</div>
+<script>
+const W = 1654, H = 2339; // A-series poster @2x
+const cv = document.getElementById("c");
+cv.width = W; cv.height = H;
+const g = cv.getContext("2d");
+
+// ---------- seeded PRNG ----------
+let seed = 0, s0 = 0;
+function srand(s) { s0 = s >>> 0; }
+function rnd() { s0 = (s0 * 1664525 + 1013904223) >>> 0; return s0 / 4294967296; }
+function ri(a, b) { return a + Math.floor(rnd() * (b - a + 1)); }
+function pick(a) { return a[Math.floor(rnd() * a.length)]; }
+
+// ---------- naming ----------
+const TYPES = [
+  ["VAULT",  "Gewölbebau", "VAULT / NAVE / GUASTAVINO"],
+  ["TEMPLE", "Tempelbau",  "TEMPLE / PERISTYLE / PSEVDOPERIPTERAL"],
+  ["GRAFTED ORDER", "Pfropfwerk", "GRAFTED ORDER / COMPOSITE / RUIN GRAFT"],
+  ["TERMINAL", "Bahnhofswerk", "TERMINAL / CONCOURSE / GANTRY"],
+  ["SILO", "Speicherbau", "SILO / BATTERY / GRANARY"],
+  ["FOUNDRY", "Industriewerk", "FOUNDRY / HALL / TRAVERSE"],
+];
+const MODS = ["RIBS","BAYS","COURSES","OCVLVS","ABVTMENT","SPANDREL","CLERESTORY","APSE","NARTHEX","BLOCKS","COLVMNAE","EPISTYLIVM","PLINTHS","RVINS"];
+
+// ---------- iso projection ----------
+let NIGHT = false, INK, PAPER, ORANGE = "#e8501e";
+function iso(x, y, z) {
+  const a = Math.cos(0.523), b = Math.sin(0.523);
+  return [(x - y) * a, (x + y) * b * 0.62 - z];
+}
+// jittered line
+function jl(x1, y1, x2, y2) {
+  const d = Math.hypot(x2 - x1, y2 - y1), n = Math.max(2, d / 14 | 0);
+  g.beginPath(); g.moveTo(x1 + rnd() - .5, y1 + rnd() - .5);
+  for (let i = 1; i <= n; i++) {
+    const t = i / n;
+    g.lineTo(x1 + (x2 - x1) * t + (rnd() - .5) * 1.4, y1 + (y2 - y1) * t + (rnd() - .5) * 1.4);
+  }
+  g.stroke();
+}
+function edge(p, q) { const a = iso(...p), b2 = iso(...q); jl(a[0], a[1], b2[0], b2[1]); }
+function box(x, y, z, w, d, h, fill) {
+  const P = [[x,y,z],[x+w,y,z],[x+w,y+d,z],[x,y+d,z],[x,y,z+h],[x+w,y,z+h],[x+w,y+d,z+h],[x,y+d,z+h]];
+  if (fill) {
+    const top = [4,5,6,7].map(i => iso(...P[i]));
+    g.fillStyle = fill; g.globalAlpha = 0.25;
+    g.beginPath(); g.moveTo(...top[0]); top.forEach(p => g.lineTo(...p)); g.closePath(); g.fill();
+    const side = [1,2,6,5].map(i => iso(...P[i]));
+    g.globalAlpha = 0.15; g.beginPath(); g.moveTo(...side[0]); side.forEach(p => g.lineTo(...p)); g.closePath(); g.fill();
+    g.globalAlpha = 1;
+  }
+  const E = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  E.forEach(([a,b2]) => edge(P[a], P[b2]));
+}
+function cyl(x, y, z, r, h) {
+  const n = 10, pts = [];
+  for (let i = 0; i <= n; i++) { const a = i / n * Math.PI * 2; pts.push([x + Math.cos(a) * r, y + Math.sin(a) * r]); }
+  for (let i = 0; i < n; i++) { edge([...pts[i], z], [...pts[i+1], z]); edge([...pts[i], z + h], [...pts[i+1], z + h]); }
+  for (let i = 0; i < n; i += 2) edge([...pts[i], z], [...pts[i], z + h]);
+}
+function vaultRoof(x, y, z, w, d) {
+  const n = 8;
+  for (let s = 0; s <= 6; s++) {
+    const yy = y + d * s / 6; let prev = null;
+    for (let i = 0; i <= n; i++) {
+      const t = i / n, p = [x + w * t, yy, z + Math.sin(t * Math.PI) * w * 0.35];
+      if (prev) edge(prev, p); prev = p;
+    }
+  }
+  for (let i = 0; i <= n; i += 2) {
+    const t = i / n;
+    edge([x + w * t, y, z + Math.sin(t * Math.PI) * w * .35], [x + w * t, y + d, z + Math.sin(t * Math.PI) * w * .35]);
+  }
+}
+function colonnade(x, y, z, w, count, h) {
+  for (let i = 0; i < count; i++) cyl(x + i * (w / (count - 1)), y, z, 3.5, h);
+  box(x - 6, y - 6, z + h, w + 12, 12, 8); // architrave
+  // pediment
+  const p1 = iso(x - 6, y, z + h + 8), p2 = iso(x + w + 6, y, z + h + 8), p3 = iso(x + w / 2, y, z + h + 34);
+  jl(p1[0], p1[1], p3[0], p3[1]); jl(p3[0], p3[1], p2[0], p2[1]);
+}
+function human(x, y, z) { const p = iso(x, y, z); g.beginPath(); g.arc(p[0], p[1] - 6, 1.6, 0, 7); g.stroke(); jl(p[0], p[1] - 4, p[0], p[1]); }
+function tree(x, y) { const p = iso(x, y, 0); jl(p[0], p[1], p[0], p[1] - 9); g.beginPath(); g.arc(p[0], p[1] - 13, 5 + rnd() * 3, 0, 7); g.stroke(); }
+
+// ---------- scene ----------
+function drawScene(cx, cy, type) {
+  g.save(); g.translate(cx, cy); g.strokeStyle = INK; g.lineWidth = 0.9;
+  const S = 190;
+  // ground plate + basements
+  box(-S, -S, 0, 2*S, 2*S, 0);
+  box(-S, -S, -70, 2*S, 2*S, 70);
+  [-24, -48].forEach(z => { g.globalAlpha = .5; box(-S, -S, z, 2*S, 2*S, 0); g.globalAlpha = 1; });
+  // diagonal rail
+  g.globalAlpha = .8; box(-S - 90, 60, -8, 2*S + 200, 26, 8, "#c8a060"); g.globalAlpha = 1;
+  // podium
+  const colors = ["#e8724a", "#8aa07a", "#c8a060", "#b05540", null, null];
+  box(-120, -120, 0, 240, 240, ri(14, 24));
+  const pz = 18;
+  // typology-biased modules
+  const N = ri(9, 14);
+  for (let i = 0; i < N; i++) {
+    const x = ri(-110, 50), y = ri(-110, 50), w = ri(20, 60), d = ri(20, 60);
+    box(x, y, pz, w, d, ri(12, 90), pick(colors));
+  }
+  if (type === "VAULT") { vaultRoof(-90, -60, pz + 40, 110, 120); box(-90, -60, pz, 110, 120, 40); }
+  if (type === "TEMPLE") { box(-80, -70, pz, 130, 90, 12); colonnade(-70, -60, pz + 12, 110, 8, 46); }
+  if (type === "GRAFTED ORDER") { for (let t = 0; t < 3; t++) box(-30 + t * 8, -30 + t * 6, pz + t * 70, 60 - t * 12, 60 - t * 10, 70, t === 1 ? "#b05540" : null); colonnade(-60, 40, pz, 90, 6, 34); }
+  if (type === "SILO") for (let t = 0; t < 5; t++) cyl(-70 + t * 34, ri(-40, 20), pz, 14, ri(50, 110));
+  if (type === "TERMINAL" || type === "FOUNDRY") { vaultRoof(-100, -40, pz + 30, 90, 130); box(-100, -40, pz, 90, 130, 30); box(20, -100, pz, 40, 40, ri(90, 140), "#e8724a"); }
+  // towers
+  for (let t = 0; t < ri(2, 4); t++) { const x = ri(-90, 70), y = ri(-90, 70); box(x, y, pz, 18, 18, ri(80, 170)); }
+  // crane
+  const bx = ri(-60, 60), by = ri(-60, 60);
+  edge([bx, by, pz], [bx, by, pz + 190]); edge([bx, by, pz + 190], [bx + 90, by, pz + 182]); edge([bx, by, pz + 190], [bx - 30, by, pz + 186]);
+  // scatter
+  for (let i = 0; i < 20; i++) human(ri(-S, S), ri(-S, S), 0);
+  for (let i = 0; i < 8; i++) tree(ri(-S, -130) + (rnd() < .5 ? 260 : 0), ri(-S, S));
+  // roads + vehicles
+  jl(...iso(-S, 140, 0), ...iso(S, 140, 0));
+  for (let i = 0; i < 6; i++) box(ri(-S, S - 10), 134, 0, 9, 5, 4);
+  // UAV
+  for (let i = 0; i < 3; i++) { const p = iso(ri(-S, S), ri(-S, 0), 240 + rnd() * 60); jl(p[0]-6,p[1],p[0]+6,p[1]); jl(p[0],p[1]-3,p[0],p[1]+3); }
+  // level markers
+  g.font = "10px Courier New"; g.fillStyle = INK;
+  for (let l = 0; l < 6; l++) {
+    const y = 120 - l * 68; g.globalAlpha = .5;
+    g.setLineDash([3, 5]); jl(-460, y, 460, y); g.setLineDash([]);
+    g.fillRect(-500, y - 8, 34, 15); g.fillStyle = PAPER; g.fillText("L" + (l + 1), -493, y + 3);
+    g.fillStyle = INK; g.fillText("+" + (l * 15.6).toFixed(1) + "M", 470, y + 3); g.globalAlpha = 1;
+  }
+  g.restore();
+}
+
+// ---------- poster ----------
+function gen(fixedSeed) {
+  seed = fixedSeed ?? (Math.random() * 1e9 | 0);
+  srand(seed);
+  const [type, title, taxo] = pick(TYPES);
+  NIGHT = rnd() < 0.3;
+  PAPER = NIGHT ? "#101014" : "#eae6dd";
+  INK = NIGHT ? "#d8d4c8" : "#1c1a18";
+  const num = ri(10, 99), spec = ri(1000, 9999);
+  const sysId = "IS-" + ri(10000, 99999) + pick(["A","B","C","E"]);
+  document.getElementById("tag").textContent = type + " · PODIUM+TOWER · #" + spec;
+
+  // paper
+  g.fillStyle = PAPER; g.fillRect(0, 0, W, H);
+  // grain
+  for (let i = 0; i < 9000; i++) { g.fillStyle = NIGHT ? "rgba(255,255,255,.02)" : "rgba(0,0,0,.025)"; g.fillRect(rnd() * W, rnd() * H, 1, 1); }
+
+  // watermark number
+  g.fillStyle = INK; g.globalAlpha = .07;
+  g.font = "900 560px Helvetica, Arial"; g.fillText(num, W - 720, H - 460); g.globalAlpha = 1;
+
+  // top black bar
+  g.fillStyle = "#1c1a18"; g.fillRect(0, 0, W, 56);
+  g.fillStyle = "#eae6dd"; g.font = "bold 17px Courier New";
+  g.fillText("SPECIMEN " + spec + " : " + type, 40, 36);
+  g.fillText(">>>>>>>>>>>>>", 660, 36);
+  g.fillStyle = ORANGE; g.fillText("CIVIC SECTOR / " + (NIGHT ? "NOCTURNE" : "DAYLIGHT"), W - 420, 36);
+
+  // title
+  g.fillStyle = INK;
+  g.font = "900 96px Helvetica, Arial"; g.fillText(title, 60, 190);
+  g.font = "bold 15px Courier New"; g.fillText(taxo, 62, 222);
+  g.textAlign = "right";
+  g.fillText("VIEW: AZ " + ri(0, 359) + "° / EL " + ri(20, 60) + "°", W - 130, 200);
+  g.textAlign = "left";
+
+  // metadata
+  g.font = "12px Courier New"; g.globalAlpha = .85;
+  const L = ["SYSTEM ID: " + sysId, "PLATFORM CLASS: " + pick(["BARREL SERIES","ANCIENT","TEXTILE"]) + " / " + pick(["USHAPE","MODERN","OFFSET"]),
+    "CONFIGURATION: PODIUM+TOWER / HYBRID", "GROUND: " + pick(["VALLEY / RIVER / DELTA","HEADLAND / LITTORAL","MESA / QUARRY"]),
+    "DENSITY: MANY / DETAIL DETAILED", "STATUS: GENERATED"];
+  L.forEach((t, i) => g.fillText(t, 62, 264 + i * 18));
+  const R = ["TRANSIT: TERMINUS + METRO+1", "VEHICLES: " + ri(4, 20) + " ROAD", "FOOTFALL: " + ri(20, 90) + " ON FOOT",
+    "AIRSPACE: " + ri(1, 3) + " FIXED / " + ri(2, 8) + " UAV", "SUBSURFACE: B3 / -" + ri(40, 80) + "M", "UNITS: " + ri(1, 4)];
+  g.textAlign = "right"; R.forEach((t, i) => g.fillText(t, W - 130, 264 + i * 18)); g.textAlign = "left";
+  g.globalAlpha = .18; g.font = "600 44px Helvetica, Arial"; g.fillText("Stadtviertel", 62, 420); g.globalAlpha = 1;
+
+  // drawing
+  drawScene(W / 2 - 40, H / 2 - 60, type);
+
+  // footer panels
+  const fy = H - 340;
+  g.strokeStyle = INK; g.setLineDash([4, 6]); g.beginPath(); g.moveTo(60, fy); g.lineTo(W - 130, fy); g.stroke(); g.setLineDash([]);
+  g.font = "bold 13px Courier New"; g.fillStyle = INK;
+  g.fillText("[KEY PLAN]", 62, fy + 30); g.fillText("[INDEX]", 380, fy + 30);
+  g.fillText("[SCALE]", 850, fy + 30); g.fillText("[CONFIGURATION]", 1180, fy + 30);
+  // key plan
+  g.strokeRect(62, fy + 45, 130, 130);
+  g.fillStyle = ORANGE; g.save(); g.translate(127, fy + 110); g.rotate(rnd());
+  g.fillRect(-22, -22, 44, 44); g.fillRect(14, 24, 14, 14); g.restore();
+  // index
+  g.fillStyle = INK; g.font = "11px Courier New";
+  for (let i = 0; i < 10; i++) {
+    const col = i % 2, row = i / 2 | 0;
+    g.fillText("[M0" + (i + 1) + "] " + pick(MODS).padEnd(11) + String(ri(1, 20)).padStart(3, "0"), 380 + col * 220, fy + 58 + row * 20);
+  }
+  // scale bar
+  for (let i = 0; i < 6; i++) { g.fillStyle = i % 2 ? PAPER : ORANGE; g.fillRect(850 + i * 40, fy + 48, 40, 12); }
+  g.strokeRect(850, fy + 48, 240, 12);
+  g.fillStyle = INK;
+  ["1:100 / 40 M", "PROJECTION: AXONOMETRIC", "PALETTE: CHEROKEE AUTUMN", "PAPER: STANDARD / INK: BOLD"].forEach((t, i) => g.fillText(t, 850, fy + 84 + i * 18));
+  // config
+  const cfg = [["MODE", type], ["DISPOSITION", "PODIUM+TOWER"], ["TERRAIN", "VALLEY / RIVER"], ["BRIDGE", "SUSPENSION"], ["SKY", NIGHT ? "NOCTURNE" : "DAYLIGHT"], ["STRUCT", "MANY"]];
+  cfg.forEach(([k, v], i) => { g.fillText(k, 1180, fy + 58 + i * 20); g.textAlign = "right"; g.font = "bold 11px Courier New"; g.fillText(v, W - 140, fy + 58 + i * 20); g.textAlign = "left"; g.font = "11px Courier New"; });
+
+  // bottom bar
+  g.fillStyle = "#1c1a18"; g.fillRect(0, H - 90, W, 90);
+  g.fillStyle = ORANGE; g.fillRect(0, H - 90, 200, 90);
+  g.fillStyle = "#1c1a18"; g.font = "900 56px Helvetica, Arial"; g.fillText(num, 24, H - 28);
+  g.fillStyle = "#eae6dd"; g.font = "bold 16px Courier New";
+  g.fillText(type.split(" ")[0], 120, H - 38); g.fillText("SHEET 1 / 1   >>>>>>>>>>", 260, H - 38);
+  g.font = "900 34px Helvetica, Arial"; g.textAlign = "right"; g.fillText(sysId, W - 130, H - 32); g.textAlign = "left";
+
+  // orange sidebar
+  g.fillStyle = ORANGE; g.fillRect(W - 100, 0, 100, H);
+  g.fillStyle = "#1c1a18"; g.font = "900 40px Helvetica, Arial"; g.fillText(num, W - 82, 60);
+  g.save(); g.translate(W - 45, 120); g.rotate(Math.PI / 2);
+  g.font = "bold 14px Courier New"; g.fillText("GENERATIVE ANTITECTURE / RDS SYSTEM / SPECIMEN " + spec, 0, 0); g.restore();
+  // hatch stripe
+  g.strokeStyle = "#1c1a18"; g.lineWidth = 3;
+  for (let i = 0; i < 12; i++) { g.beginPath(); g.moveTo(W - 100, H - 200 + i * 12); g.lineTo(W - 60, H - 240 + i * 12); g.stroke(); }
+}
+
+function save() {
+  const a = document.createElement("a");
+  a.download = "antitecture-" + seed + ".png";
+  a.href = cv.toDataURL("image/png"); a.click();
+}
+gen();
+</script>
+</body>
+</html>

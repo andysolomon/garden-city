@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Procedural City Kernel v1</title>
+<style>
+  :root {
+    --bg:#0d0e10; --panel:#15171b; --panel2:#1b1e23; --line:#30343c;
+    --text:#e8e5dd; --muted:#858b96; --accent:#e8501e;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:"Courier New",monospace}
+  #app{position:fixed;inset:0}
+  #viewport{position:absolute;inset:0;background:#d8d2c5}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  header{position:fixed;left:18px;top:16px;z-index:5;pointer-events:none;text-shadow:0 1px 12px rgba(0,0,0,.35)}
+  header .title{font-size:13px;font-weight:700;letter-spacing:3px}
+  header .sub{margin-top:4px;color:var(--muted);font-size:10px;letter-spacing:2px}
+  #status{position:fixed;right:20px;top:18px;z-index:5;font-size:10px;letter-spacing:2px;color:rgba(20,20,20,.65);background:rgba(245,242,234,.65);backdrop-filter:blur(8px);padding:8px 10px;border:1px solid rgba(0,0,0,.08)}
+  #panel{position:fixed;z-index:8;top:72px;left:18px;width:285px;max-height:calc(100vh - 150px);overflow:auto;background:rgba(17,19,23,.94);border:1px solid var(--line);box-shadow:0 14px 50px rgba(0,0,0,.35);backdrop-filter:blur(14px)}
+  #panel.hidden{display:none}
+  .panel-hd{padding:13px 14px;border-bottom:1px solid var(--line);font-size:10px;letter-spacing:2px;color:#b7bbc3;display:flex;justify-content:space-between}
+  .row{display:grid;grid-template-columns:95px 1fr;gap:8px;align-items:center;padding:7px 12px;border-bottom:1px solid rgba(255,255,255,.045)}
+  .row label{font-size:9px;letter-spacing:1.5px;color:#8d929c}
+  select,input{width:100%;height:30px;background:#101216;color:#e5e1d7;border:1px solid #343841;padding:0 8px;font:10px "Courier New",monospace;outline:none}
+  select:focus,input:focus{border-color:#666d79}
+  .panel-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;padding:10px}
+  button{height:34px;background:#20242a;color:#d9d6cd;border:1px solid #3a3f48;font:9px "Courier New",monospace;letter-spacing:1.2px;cursor:pointer}
+  button:hover{background:#2a2f37}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#161616;font-weight:700}
+  #bottom{position:fixed;z-index:8;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:7px;background:rgba(17,19,23,.93);padding:7px;border:1px solid var(--line);backdrop-filter:blur(12px)}
+  #bottom button{padding:0 16px}
+  #help{position:fixed;z-index:4;left:50%;bottom:72px;transform:translateX(-50%);font-size:9px;letter-spacing:1.4px;color:rgba(30,30,30,.55);background:rgba(245,242,234,.55);padding:6px 9px;pointer-events:none}
+  #stats{position:fixed;z-index:4;right:18px;bottom:18px;min-width:160px;font-size:9px;line-height:1.55;letter-spacing:1px;color:rgba(30,30,30,.66);background:rgba(245,242,234,.65);border:1px solid rgba(0,0,0,.08);padding:9px 11px;backdrop-filter:blur(8px);pointer-events:none}
+  #stats b{font-weight:700;color:rgba(10,10,10,.78)}
+  @media(max-width:720px){#panel{left:10px;right:10px;width:auto;top:58px;max-height:62vh}header{left:12px;top:12px}#status,#stats{display:none}#help{bottom:68px;white-space:nowrap;font-size:8px}#bottom{bottom:10px;width:calc(100% - 20px);justify-content:center;overflow:auto}#bottom button{padding:0 10px;flex:0 0 auto}}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="viewport"></div>
+  <header><div class="title">PROCEDURAL CITY KERNEL</div><div class="sub">RDS SYSTEM · MODEL → GEOMETRY → RENDER</div></header>
+  <div id="status">READY</div>
+
+  <aside id="panel">
+    <div class="panel-hd"><span>CITY PARAMETERS</span><span>v1.0</span></div>
+    <div class="row"><label>MODE</label><select id="mode"><option value="solid">SOLID</option><option value="wire">WIREFRAME</option><option value="blueprint">BLUEPRINT</option></select></div>
+    <div class="row"><label>PALETTE</label><select id="palette"><option value="concrete">CONCRETE</option><option value="warm">WARM URBAN</option><option value="cool">COOL METRO</option><option value="nocturne">NOCTURNE</option></select></div>
+    <div class="row"><label>MASSING</label><select id="massing"><option value="mixed">MIXED</option><option value="core">DOWNTOWN CORE</option><option value="euro">EURO BLOCKS</option><option value="lowrise">LOW-RISE</option><option value="industrial">INDUSTRIAL</option></select></div>
+    <div class="row"><label>LAND</label><select id="land"><option value="flat">FLAT</option><option value="river">RIVER</option><option value="coast">COAST</option><option value="island">ISLAND</option></select></div>
+    <div class="row"><label>AIR</label><select id="air"><option value="none">NONE</option><option value="sparse">SPARSE</option><option value="busy">BUSY</option></select></div>
+    <div class="row"><label>RAIL</label><select id="rail"><option value="none">NONE</option><option value="metro">METRO</option><option value="elevated">ELEVATED</option><option value="terminal">TERMINAL</option></select></div>
+    <div class="row"><label>SECTOR</label><select id="sector"><option value="mixed">MIXED</option><option value="residential">RESIDENTIAL</option><option value="commercial">COMMERCIAL</option><option value="industrial">INDUSTRIAL</option><option value="civic">CIVIC</option></select></div>
+    <div class="row"><label>SKY</label><select id="sky"><option value="day">DAYLIGHT</option><option value="dusk">DUSK</option><option value="night">NOCTURNE</option></select></div>
+    <div class="row"><label>DETAIL</label><select id="detail"><option value="low">LOW</option><option value="med" selected>MEDIUM</option><option value="high">HIGH</option></select></div>
+    <div class="row"><label>DENSITY</label><select id="density"><option value="low">LOW</option><option value="med" selected>MEDIUM</option><option value="high">HIGH</option><option value="extreme">EXTREME</option></select></div>
+    <div class="row"><label>SEED</label><input id="seed" value="RANDOM" spellcheck="false" /></div>
+    <div class="row"><label>ROTATION</label><select id="rotation"><option value="on" selected>ON</option><option value="off">OFF</option></select></div>
+    <div class="row"><label>CITY LIFE</label><select id="life"><option value="off">OFF</option><option value="low" selected>LOW</option><option value="high">HIGH</option></select></div>
+    <div class="row"><label>ORBIT SPEED</label><select id="orbit"><option value="slow">SLOW</option><option value="normal" selected>NORMAL</option><option value="fast">FAST</option></select></div>
+    <div class="panel-actions"><button id="resetView">RESET VIEW</button><button id="newSeed">NEW SEED</button><button id="draw" class="primary">DRAW</button></div>
+  </aside>
+
+  <div id="help">DRAG TO ORBIT · WHEEL/PINCH TO ZOOM · RIGHT-DRAG TO PAN</div>
+  <div id="bottom"><button id="options">OPTIONS</button><button id="generate" class="primary">GENERATE</button><button id="fit">FIT</button><button id="save">SAVE PNG</button></div>
+  <div id="stats"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// -----------------------------------------------------------------------------
+// 1) DETERMINISTIC RANDOMNESS
+// -----------------------------------------------------------------------------
+class RNG {
+  constructor(seed) { this.state = hashSeed(seed) >>> 0 || 0x9e3779b9; }
+  next() { this.state = (this.state * 1664525 + 1013904223) >>> 0; return this.state / 4294967296; }
+  float(a=0,b=1){ return a + (b-a)*this.next(); }
+  int(a,b){ return a + Math.floor(this.next()*(b-a+1)); }
+  bool(p=.5){ return this.next() < p; }
+  pick(arr){ return arr[Math.floor(this.next()*arr.length)]; }
+}
+function hashSeed(v){
+  const s=String(v); let h=2166136261>>>0;
+  for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); }
+  return h>>>0;
+}
+function randomSeed(){ return Math.floor(Math.random()*0xffffffff).toString(36).toUpperCase(); }
+
+// -----------------------------------------------------------------------------
+// 2) CITY MODEL — generation never touches THREE.js
+// -----------------------------------------------------------------------------
+const CITY_SIZE = 900;
+const DENSITY = {
+  low:     {depth:4, minBlock:100, parcel:58, height:[8,42],  park:.18},
+  med:     {depth:5, minBlock:78,  parcel:48, height:[12,72], park:.13},
+  high:    {depth:6, minBlock:64,  parcel:40, height:[18,118],park:.09},
+  extreme: {depth:6, minBlock:56,  parcel:34, height:[22,170],park:.06},
+};
+
+function readConfig(){
+  const id = x => document.getElementById(x).value;
+  let seed=id('seed').trim(); if(!seed || seed.toUpperCase()==='RANDOM') seed=randomSeed();
+  document.getElementById('seed').value=seed;
+  return {seed,mode:id('mode'),palette:id('palette'),massing:id('massing'),land:id('land'),air:id('air'),rail:id('rail'),sector:id('sector'),sky:id('sky'),detail:id('detail'),density:id('density'),rotation:id('rotation'),life:id('life'),orbit:id('orbit')};
+}
+
+function generateCity(config){
+  const rng = new RNG(config.seed);
+  const dcfg = DENSITY[config.density];
+  const model = {
+    config, seed:config.seed, size:CITY_SIZE,
+    roads:[], blocks:[], parcels:[], buildings:[], parks:[], trees:[], cars:[], drones:[], rail:[], landmarks:[], water:[]
+  };
+
+  // Land masks are functions, which means the generator can later swap in heightmaps,
+  // GIS coastlines, or painted masks without changing the rest of the pipeline.
+  const landMask = makeLandMask(config.land, rng, model);
+
+  // Hierarchical street network via recursive block subdivision.
+  // Each split creates a road and two child regions. Leaf regions become blocks.
+  const root={x:-CITY_SIZE/2,z:-CITY_SIZE/2,w:CITY_SIZE,d:CITY_SIZE,level:0};
+  subdivide(root,0);
+
+  function subdivide(rect, level){
+    const maxDepth = dcfg.depth;
+    const canV = rect.w > dcfg.minBlock*2.05;
+    const canH = rect.d > dcfg.minBlock*2.05;
+    const stop = level>=maxDepth || (!canV && !canH) || (level>2 && rng.bool(.12));
+    if(stop){ addBlock(rect); return; }
+
+    let vertical;
+    if(canV && !canH) vertical=true;
+    else if(canH && !canV) vertical=false;
+    else {
+      const aspect=rect.w/rect.d;
+      vertical = aspect>1.2 ? true : aspect<.83 ? false : rng.bool();
+    }
+
+    const roadW = level===0 ? 28 : level===1 ? 20 : level<=3 ? 13 : 9;
+    if(vertical){
+      const min=dcfg.minBlock, available=rect.w-roadW;
+      const cut = Math.min(available-min, Math.max(min, available*rng.float(.38,.62)));
+      const rx=rect.x+cut;
+      model.roads.push({x:rx,z:rect.z,w:roadW,d:rect.d,level,type:level<2?'arterial':'street'});
+      subdivide({x:rect.x,z:rect.z,w:cut,d:rect.d,level:level+1},level+1);
+      subdivide({x:rx+roadW,z:rect.z,w:rect.w-cut-roadW,d:rect.d,level:level+1},level+1);
+    } else {
+      const min=dcfg.minBlock, available=rect.d-roadW;
+      const cut = Math.min(available-min, Math.max(min, available*rng.float(.38,.62)));
+      const rz=rect.z+cut;
+      model.roads.push({x:rect.x,z:rz,w:rect.w,d:roadW,level,type:level<2?'arterial':'street'});
+      subdivide({x:rect.x,z:rect.z,w:rect.w,d:cut,level:level+1},level+1);
+      subdivide({x:rect.x,z:rz+roadW,w:rect.w,d:rect.d-cut-roadW,level:level+1},level+1);
+    }
+  }
+
+  function addBlock(rect){
+    const inset = config.detail==='high'?7:9;
+    const b={x:rect.x+inset,z:rect.z+inset,w:Math.max(4,rect.w-inset*2),d:Math.max(4,rect.d-inset*2)};
+    const cx=b.x+b.w/2, cz=b.z+b.d/2;
+    if(!landMask(cx,cz,b)) return;
+
+    b.dist=Math.hypot(cx,cz)/(CITY_SIZE*.707);
+    b.zone=pickZone(config.sector,b.dist,rng);
+    model.blocks.push(b);
+
+    const parkChance = dcfg.park + (b.zone==='civic'?.08:0);
+    if(rng.bool(parkChance)){ addPark(b); return; }
+    subdivideParcels(b);
+  }
+
+  function addPark(b){
+    model.parks.push({...b});
+    const n=Math.max(4,Math.floor((b.w*b.d)/2600));
+    for(let i=0;i<n;i++) model.trees.push({x:rng.float(b.x+7,b.x+b.w-7),z:rng.float(b.z+7,b.z+b.d-7),s:rng.float(.7,1.35)});
+  }
+
+  function subdivideParcels(b){
+    const target=dcfg.parcel;
+    const cols=Math.max(1,Math.floor(b.w/target));
+    const rows=Math.max(1,Math.floor(b.d/target));
+    const cw=b.w/cols, rd=b.d/rows;
+    for(let iz=0;iz<rows;iz++) for(let ix=0;ix<cols;ix++){
+      const gap=rng.float(3.5,7.5);
+      const p={x:b.x+ix*cw+gap,z:b.z+iz*rd+gap,w:Math.max(7,cw-gap*2),d:Math.max(7,rd-gap*2),zone:b.zone,dist:b.dist};
+      model.parcels.push(p);
+      if(rng.bool(config.density==='low'?.12:.045)) continue;
+      addBuilding(p);
+    }
+  }
+
+  function addBuilding(p){
+    let [h0,h1]=dcfg.height;
+    let centerBias=Math.pow(1-Math.min(1,p.dist),1.55);
+    if(config.massing==='core') centerBias=Math.pow(1-Math.min(1,p.dist),2.4)*1.25;
+    if(config.massing==='lowrise'){ h1=Math.min(h1,36); centerBias*=.35; }
+    if(config.massing==='euro'){ h0=10; h1=Math.min(h1,34); centerBias=.3+.25*centerBias; }
+    if(config.massing==='industrial'){ h0=7; h1=26; centerBias=.2; }
+
+    let zoneScale={residential:.72,commercial:1.25,industrial:.42,civic:.88,mixed:1}[p.zone]||1;
+    let h=(h0+(h1-h0)*(0.16+0.84*centerBias)*rng.float(.55,1.16))*zoneScale;
+    if(config.massing==='mixed' && rng.bool(.08+centerBias*.14)) h*=rng.float(1.35,2.0);
+    h=Math.max(5,h);
+
+    const set=rng.float(1.5,4.5), x=p.x+set, z=p.z+set, w=Math.max(5,p.w-set*2), d=Math.max(5,p.d-set*2);
+    const style = chooseBuildingStyle(config.massing,p.zone,rng);
+    const b={x,z,w,d,h,zone:p.zone,style,roof:rng.pick(['flat','flat','flat','step'])};
+    model.buildings.push(b);
+
+    // A tiny grammar: some towers receive a podium/upper setback rather than becoming one box.
+    if(h>58 && w>13 && d>13 && rng.bool(.58)){
+      const topH=h*rng.float(.48,.72), inset=rng.float(2.2,Math.min(6,Math.min(w,d)*.2));
+      b.h-=topH*.22;
+      model.buildings.push({x:x+inset,z:z+inset,w:w-inset*2,d:d-inset*2,h:topH,y:b.h,zone:p.zone,style:'tower',roof:'flat'});
+    }
+  }
+
+  addRail(config.rail,model,rng);
+  addLife(config.life,model,rng);
+  addAir(config.air,model,rng);
+  addLandmark(model,rng,config);
+  return model;
+}
+
+function makeLandMask(kind,rng,model){
+  if(kind==='river'){
+    const x=rng.float(-70,70), width=rng.float(60,92);
+    model.water.push({x:x-width/2,z:-CITY_SIZE*.56,w:width,d:CITY_SIZE*1.12,type:'river'});
+    return (cx,cz,b)=>!(b.x < x+width/2 && b.x+b.w > x-width/2);
+  }
+  if(kind==='coast'){
+    const edge=rng.float(-250,-120);
+    model.water.push({x:-CITY_SIZE*.72,z:-CITY_SIZE*.56,w:(edge+CITY_SIZE*.72),d:CITY_SIZE*1.12,type:'coast'});
+    return (cx)=>cx>edge+22;
+  }
+  if(kind==='island'){
+    model.water.push({x:-CITY_SIZE*.65,z:-CITY_SIZE*.65,w:CITY_SIZE*1.3,d:CITY_SIZE*1.3,type:'sea'});
+    return (cx,cz)=>((cx/(CITY_SIZE*.43))**2+(cz/(CITY_SIZE*.38))**2)<1;
+  }
+  return ()=>true;
+}
+function pickZone(sector,dist,rng){
+  if(sector!=='mixed') return sector;
+  const r=rng.next();
+  if(dist<.22 && r<.62) return 'commercial';
+  if(r<.48) return 'residential';
+  if(r<.70) return 'mixed';
+  if(r<.84) return 'commercial';
+  if(r<.94) return 'industrial';
+  return 'civic';
+}
+function chooseBuildingStyle(massing,zone,rng){
+  if(massing==='industrial'||zone==='industrial') return rng.pick(['shed','warehouse','stack']);
+  if(massing==='euro') return rng.pick(['perimeter','masonry','masonry']);
+  if(zone==='civic') return rng.pick(['civic','hall']);
+  return rng.pick(['slab','tower','slab','block']);
+}
+function addRail(kind,model,rng){
+  if(kind==='none') return;
+  const vertical=rng.bool();
+  const offset=rng.float(-100,100);
+  model.rail.push({vertical,offset,elevated:kind==='elevated'||kind==='terminal',terminal:kind==='terminal'});
+}
+function addLife(level,model,rng){
+  if(level==='off') return;
+  const carCount=level==='high'?120:38;
+  for(let i=0;i<carCount && model.roads.length;i++){
+    const r=rng.pick(model.roads); const horizontal=r.w>r.d;
+    const x=horizontal?rng.float(r.x+6,r.x+r.w-6):r.x+r.w*.5+rng.float(-3,3);
+    const z=horizontal?r.z+r.d*.5+rng.float(-3,3):rng.float(r.z+6,r.z+r.d-6);
+    model.cars.push({x,z,rot:horizontal?0:Math.PI/2,s:rng.float(.85,1.15)});
+  }
+  if(level==='high'){
+    for(const p of model.parks){
+      for(let i=0;i<5;i++) model.trees.push({x:rng.float(p.x,p.x+p.w),z:rng.float(p.z,p.z+p.d),s:rng.float(.65,1.2)});
+    }
+  }
+}
+function addAir(level,model,rng){
+  if(level==='none') return;
+  const n=level==='busy'?26:7;
+  for(let i=0;i<n;i++) model.drones.push({x:rng.float(-CITY_SIZE*.45,CITY_SIZE*.45),z:rng.float(-CITY_SIZE*.45,CITY_SIZE*.45),y:rng.float(55,180),s:rng.float(.7,1.5)});
+}
+function addLandmark(model,rng,config){
+  if(!model.blocks.length) return;
+  const candidates=model.blocks.filter(b=>b.dist<.28 && Math.min(b.w,b.d)>55);
+  if(!candidates.length) return;
+  const b=rng.pick(candidates); const size=Math.min(b.w,b.d)*.42;
+  model.landmarks.push({x:b.x+b.w/2,z:b.z+b.d/2,w:size,d:size,h:config.density==='extreme'?210:145});
+}
+
+// -----------------------------------------------------------------------------
+// 3) RENDERER — consumes CityModel; it does not decide city layout
+// -----------------------------------------------------------------------------
+const viewport=document.getElementById('viewport');
+const scene=new THREE.Scene();
+const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+viewport.appendChild(renderer.domElement);
+
+const camera=new THREE.OrthographicCamera(-500,500,500,-500,1,4000);
+camera.position.set(720,720,720);
+camera.lookAt(0,0,0);
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true; controls.dampingFactor=.055; controls.screenSpacePanning=true;
+controls.target.set(0,35,0); controls.autoRotate=true; controls.autoRotateSpeed=.75;
+controls.minZoom=.45; controls.maxZoom=4.5;
+controls.saveState();
+
+const world=new THREE.Group(); scene.add(world);
+const hemi=new THREE.HemisphereLight(0xffffff,0x59606a,2.1); scene.add(hemi);
+const sun=new THREE.DirectionalLight(0xffffff,3.2); sun.position.set(420,700,240); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-650; sun.shadow.camera.right=650; sun.shadow.camera.top=650; sun.shadow.camera.bottom=-650; scene.add(sun);
+
+const palettes={
+  concrete:{bg:0xd8d2c5,ground:0xc7c1b5,road:0x77736d,roadLine:0xe8dcc2,water:0x78919c,park:0x8d967b,build:[0xc7bfae,0xa9aaa6,0x998f83,0xd0c5ad,0x8f9698],accent:0xe8501e},
+  warm:{bg:0xe0d5c5,ground:0xc8bca7,road:0x625d58,roadLine:0xe5cda9,water:0x7a98a6,park:0x87906f,build:[0xb35e45,0xc88d63,0xd1b184,0x8e7766,0xe0c6a0],accent:0xd84e25},
+  cool:{bg:0xd7dde0,ground:0xbcc5c6,road:0x606a70,roadLine:0xdde7e8,water:0x5f879d,park:0x82988c,build:[0x8da3ac,0xaebcc0,0x6f858d,0xc1c8c5,0x667178],accent:0xd85b37},
+  nocturne:{bg:0x0b0e13,ground:0x151a20,road:0x262c33,roadLine:0x89919a,water:0x1e3e50,park:0x253d32,build:[0x343a42,0x48464c,0x2d3640,0x555156,0x242b31],accent:0xf06632}
+};
+
+let currentModel=null;
+function clearWorld(){
+  while(world.children.length){
+    const o=world.children.pop();
+    o.traverse?.(n=>{ if(n.geometry) n.geometry.dispose?.(); if(n.material){ const m=Array.isArray(n.material)?n.material:[n.material]; m.forEach(x=>x.dispose?.()); } });
+  }
+}
+function mat(color,wire=false,rough=.86){ return new THREE.MeshStandardMaterial({color,roughness:rough,metalness:.04,wireframe:wire}); }
+function addBox(group,spec,material,y=0){
+  const geo=new THREE.BoxGeometry(spec.w,spec.h??1,spec.d);
+  const m=new THREE.Mesh(geo,material); m.position.set(spec.x+spec.w/2,y+(spec.h??1)/2,spec.z+spec.d/2); m.castShadow=true; m.receiveShadow=true; group.add(m); return m;
+}
+
+function renderCity(model){
+  clearWorld(); currentModel=model;
+  const cfg=model.config, pal=palettes[cfg.palette];
+  const isWire=cfg.mode==='wire'||cfg.mode==='blueprint';
+  const blueprint=cfg.mode==='blueprint';
+
+  scene.background=new THREE.Color(blueprint?0xe7e1d5:pal.bg);
+  hemi.intensity=cfg.sky==='night'?1.05:cfg.sky==='dusk'?1.55:2.1;
+  sun.intensity=cfg.sky==='night'?.55:cfg.sky==='dusk'?1.8:3.2;
+  sun.color.set(cfg.sky==='dusk'?0xffc28f:cfg.sky==='night'?0x9bb5dc:0xffffff);
+
+  const groundMat=mat(blueprint?0xe9e4d9:pal.ground,isWire);
+  const ground=new THREE.Mesh(new THREE.BoxGeometry(CITY_SIZE+90,7,CITY_SIZE+90),groundMat); ground.position.y=-4; ground.receiveShadow=true; world.add(ground);
+
+  // water after ground, before roads/buildings
+  for(const w of model.water){
+    if(w.type==='sea'){
+      const water=new THREE.Mesh(new THREE.BoxGeometry(w.w,1.8,w.d),new THREE.MeshStandardMaterial({color:pal.water,roughness:.35,metalness:.05,transparent:true,opacity:.78})); water.position.y=1; world.add(water);
+      // island land sits back over sea
+      const island=new THREE.Mesh(new THREE.CylinderGeometry(CITY_SIZE*.42,CITY_SIZE*.45,6,64),groundMat); island.scale.z=.9; island.position.y=2.6; world.add(island);
+    } else addBox(world,{...w,h:2},new THREE.MeshStandardMaterial({color:pal.water,roughness:.35,transparent:true,opacity:.82}),1);
+  }
+
+  const roadMat=mat(blueprint?0xcfc7b7:pal.road,isWire);
+  const arterialMat=mat(blueprint?0xc2b7a4:new THREE.Color(pal.road).multiplyScalar(.82),isWire);
+  for(const r of model.roads) addBox(world,{...r,h:1.2},r.type==='arterial'?arterialMat:roadMat,.35);
+
+  // Road center markings, only at medium/high detail.
+  if(cfg.detail!=='low' && !isWire){
+    const lm=new THREE.MeshBasicMaterial({color:pal.roadLine,transparent:true,opacity:.62});
+    for(const r of model.roads.filter(r=>r.type==='arterial')){
+      const horizontal=r.w>r.d;
+      const spec=horizontal?{x:r.x,z:r.z+r.d/2-.45,w:r.w,d:.9,h:.12}:{x:r.x+r.w/2-.45,z:r.z,w:.9,d:r.d,h:.12};
+      addBox(world,spec,lm,1.05);
+    }
+  }
+
+  // Parks
+  const parkMat=mat(blueprint?0xd9d4c4:pal.park,isWire);
+  for(const p of model.parks) addBox(world,{...p,h:1.3},parkMat,.75);
+
+  // Buildings — grouped by color into instanced meshes.
+  const groups=new Map();
+  model.buildings.forEach((b,i)=>{
+    const color=blueprint?0xf0ece2:pal.build[(hashSeed(b.zone+b.style+i)%pal.build.length)];
+    if(!groups.has(color)) groups.set(color,[]); groups.get(color).push(b);
+  });
+  const baseGeo=new THREE.BoxGeometry(1,1,1); const dummy=new THREE.Object3D();
+  for(const [color,arr] of groups){
+    const material=mat(color,isWire,.78);
+    const im=new THREE.InstancedMesh(baseGeo,material,arr.length); im.castShadow=true; im.receiveShadow=true;
+    arr.forEach((b,i)=>{
+      dummy.position.set(b.x+b.w/2,(b.y||0)+b.h/2,b.z+b.d/2); dummy.scale.set(b.w,b.h,b.d); dummy.rotation.set(0,0,0); dummy.updateMatrix(); im.setMatrixAt(i,dummy.matrix);
+    });
+    im.instanceMatrix.needsUpdate=true; im.computeBoundingSphere(); world.add(im);
+  }
+
+  // Landmark mass
+  const accentMat=mat(blueprint?0xb14f2e:pal.accent,isWire,.7);
+  for(const l of model.landmarks){
+    addBox(world,{x:l.x-l.w/2,z:l.z-l.d/2,w:l.w,d:l.d,h:l.h},accentMat,0);
+    if(cfg.detail==='high'){
+      const spire=new THREE.Mesh(new THREE.ConeGeometry(l.w*.18,l.h*.35,8),accentMat); spire.position.set(l.x,l.h+l.h*.175,l.z); world.add(spire);
+    }
+  }
+
+  renderTrees(model,pal,isWire,blueprint);
+  renderCars(model,pal,isWire);
+  renderRail(model,pal,isWire);
+  renderDrones(model,pal,isWire);
+  updateStats(model);
+}
+
+function renderTrees(model,pal,isWire,blueprint){
+  if(!model.trees.length) return;
+  const trunkGeo=new THREE.CylinderGeometry(.8,.9,6,6), crownGeo=new THREE.ConeGeometry(4.2,9,7);
+  const trunk=new THREE.InstancedMesh(trunkGeo,mat(blueprint?0x8a8378:0x675647,isWire),model.trees.length);
+  const crown=new THREE.InstancedMesh(crownGeo,mat(blueprint?0xa5a093:pal.park,isWire),model.trees.length);
+  const d=new THREE.Object3D();
+  model.trees.forEach((t,i)=>{
+    d.position.set(t.x,3*t.s,t.z); d.scale.set(t.s,t.s,t.s); d.updateMatrix(); trunk.setMatrixAt(i,d.matrix);
+    d.position.set(t.x,9*t.s,t.z); d.updateMatrix(); crown.setMatrixAt(i,d.matrix);
+  });
+  trunk.instanceMatrix.needsUpdate=true; crown.instanceMatrix.needsUpdate=true; world.add(trunk,crown);
+}
+function renderCars(model,pal,isWire){
+  if(!model.cars.length) return;
+  const geo=new THREE.BoxGeometry(6,2.4,3.2), material=mat(pal.accent,isWire,.55), im=new THREE.InstancedMesh(geo,material,model.cars.length),d=new THREE.Object3D();
+  model.cars.forEach((c,i)=>{ d.position.set(c.x,2.3,c.z); d.rotation.set(0,c.rot,0); d.scale.set(c.s,c.s,c.s); d.updateMatrix(); im.setMatrixAt(i,d.matrix); }); im.instanceMatrix.needsUpdate=true; world.add(im);
+}
+function renderRail(model,pal,isWire){
+  for(const r of model.rail){
+    const y=r.elevated?15:2.1, len=CITY_SIZE*1.03;
+    const railMat=mat(0x3d3d40,isWire,.45);
+    const sleeperMat=mat(0x75695d,isWire,.9);
+    if(r.vertical){
+      addBox(world,{x:r.offset-6,z:-len/2,w:1.6,d:len,h:1},railMat,y); addBox(world,{x:r.offset+4.4,z:-len/2,w:1.6,d:len,h:1},railMat,y);
+      if(currentModel.config.detail!=='low') for(let z=-len/2;z<len/2;z+=14) addBox(world,{x:r.offset-8,z,w:16,d:1.8,h:.7},sleeperMat,y-.3);
+    } else {
+      addBox(world,{x:-len/2,z:r.offset-6,w:len,d:1.6,h:1},railMat,y); addBox(world,{x:-len/2,z:r.offset+4.4,w:len,d:1.6,h:1},railMat,y);
+      if(currentModel.config.detail!=='low') for(let x=-len/2;x<len/2;x+=14) addBox(world,{x,z:r.offset-8,w:1.8,d:16,h:.7},sleeperMat,y-.3);
+    }
+    if(r.elevated){
+      const supportMat=mat(0x8e8a83,isWire);
+      for(let q=-CITY_SIZE*.42;q<CITY_SIZE*.42;q+=70){
+        const spec=r.vertical?{x:r.offset-4,z:q,w:8,d:8,h:14}:{x:q,z:r.offset-4,w:8,d:8,h:14}; addBox(world,spec,supportMat,0);
+      }
+    }
+    if(r.terminal){
+      const term=mat(pal.accent,isWire,.65);
+      addBox(world,{x:-62,z:-28,w:124,d:56,h:24},term,0);
+    }
+  }
+}
+function renderDrones(model,pal,isWire){
+  if(!model.drones.length) return;
+  const geo=new THREE.BoxGeometry(5,.9,1.2),material=mat(pal.accent,isWire,.45),im=new THREE.InstancedMesh(geo,material,model.drones.length),d=new THREE.Object3D();
+  model.drones.forEach((a,i)=>{ d.position.set(a.x,a.y,a.z); d.rotation.set(0,i*.47,0); d.scale.set(a.s,a.s,a.s); d.updateMatrix(); im.setMatrixAt(i,d.matrix); }); im.instanceMatrix.needsUpdate=true; world.add(im);
+}
+
+// -----------------------------------------------------------------------------
+// 4) APP / CONTROLS
+// -----------------------------------------------------------------------------
+function generate(){
+  const cfg=readConfig(); setStatus('GENERATING…');
+  // Let the UI paint before CPU work.
+  requestAnimationFrame(()=>{
+    const model=generateCity(cfg); renderCity(model); applyControlConfig(cfg); fitCity(); setStatus(`SEED ${cfg.seed}`);
+  });
+}
+function applyControlConfig(cfg){
+  controls.autoRotate=cfg.rotation==='on';
+  controls.autoRotateSpeed={slow:.28,normal:.72,fast:1.75}[cfg.orbit];
+}
+function fitCity(){
+  camera.zoom=window.innerWidth<720?.72:1.0; camera.position.set(720,720,720); controls.target.set(0,45,0); camera.updateProjectionMatrix(); controls.update();
+}
+function setStatus(t){ document.getElementById('status').textContent=t; }
+function updateStats(m){
+  document.getElementById('stats').innerHTML=`<b>CITY MODEL</b><br>ROADS ${m.roads.length}<br>BLOCKS ${m.blocks.length}<br>PARCELS ${m.parcels.length}<br>BUILDINGS ${m.buildings.length}<br>PARKS ${m.parks.length}<br>VEHICLES ${m.cars.length}<br>SEED ${m.seed}`;
+}
+function resize(){
+  const w=viewport.clientWidth,h=viewport.clientHeight; renderer.setSize(w,h,false); const aspect=w/h, view=920;
+  camera.left=-view*aspect/2; camera.right=view*aspect/2; camera.top=view/2; camera.bottom=-view/2; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize',resize); resize();
+
+const $=id=>document.getElementById(id);
+$('generate').onclick=generate; $('draw').onclick=generate;
+$('newSeed').onclick=()=>{$('seed').value=randomSeed(); generate();};
+$('resetView').onclick=()=>{controls.reset();fitCity();}; $('fit').onclick=fitCity;
+$('options').onclick=()=>$('panel').classList.toggle('hidden');
+$('save').onclick=()=>{ renderer.render(scene,camera); const a=document.createElement('a'); a.download=`procedural-city-${currentModel?.seed||'city'}.png`; a.href=renderer.domElement.toDataURL('image/png'); a.click(); };
+$('rotation').onchange=()=>controls.autoRotate=$('rotation').value==='on';
+$('orbit').onchange=()=>controls.autoRotateSpeed={slow:.28,normal:.72,fast:1.75}[$('orbit').value];
+
+const timer=new THREE.Timer();
+function animate(){ requestAnimationFrame(animate); timer.update(); controls.update(timer.getDelta()); renderer.render(scene,camera); }
+generate(); animate();
+</script>
+</body>
+</html>
