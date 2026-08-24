@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Generative Antitecture — City Engine</title>
+<style>
+  :root {
+    --bg:#0d0e10; --panel:#15171b; --line:#30343c;
+    --text:#e8e5dd; --muted:#858b96; --accent:#e8501e;
+    --barink:#1c1a18; --barpaper:#eae6dd;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:"Courier New",monospace}
+  #app{position:fixed;inset:0}
+  #viewport{position:absolute;inset:0;background:#d8d2c5}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  header{position:fixed;left:18px;top:16px;z-index:5;pointer-events:none;text-shadow:0 1px 12px rgba(0,0,0,.35)}
+  header .title{font-size:13px;font-weight:700;letter-spacing:3px}
+  header .sub{margin-top:4px;color:var(--muted);font-size:10px;letter-spacing:2px}
+  #status{position:fixed;right:20px;top:18px;z-index:5;font-size:10px;letter-spacing:2px;color:rgba(20,20,20,.65);background:rgba(245,242,234,.65);backdrop-filter:blur(8px);padding:8px 10px;border:1px solid rgba(0,0,0,.08)}
+  #panel{position:fixed;z-index:8;top:72px;left:18px;width:285px;max-height:calc(100vh - 150px);overflow:auto;background:rgba(17,19,23,.94);border:1px solid var(--line);box-shadow:0 14px 50px rgba(0,0,0,.35);backdrop-filter:blur(14px)}
+  #panel.hidden{display:none}
+  .panel-hd{padding:13px 14px;border-bottom:1px solid var(--line);font-size:10px;letter-spacing:2px;color:#b7bbc3;display:flex;justify-content:space-between}
+  .row{display:grid;grid-template-columns:95px 1fr;gap:8px;align-items:center;padding:7px 12px;border-bottom:1px solid rgba(255,255,255,.045)}
+  .row label{font-size:9px;letter-spacing:1.5px;color:#8d929c}
+  select,input{width:100%;height:30px;background:#101216;color:#e5e1d7;border:1px solid #343841;padding:0 8px;font:10px "Courier New",monospace;outline:none}
+  select:focus,input:focus{border-color:#666d79}
+  .panel-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;padding:10px}
+  button{height:34px;background:#20242a;color:#d9d6cd;border:1px solid #3a3f48;font:9px "Courier New",monospace;letter-spacing:1.2px;cursor:pointer}
+  button:hover{background:#2a2f37}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#161616;font-weight:700}
+  #bottom{position:fixed;z-index:8;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:7px;background:rgba(17,19,23,.93);padding:7px;border:1px solid var(--line);backdrop-filter:blur(12px)}
+  #bottom button{padding:0 16px}
+  #help{position:fixed;z-index:4;left:50%;bottom:72px;transform:translateX(-50%);font-size:9px;letter-spacing:1.4px;color:rgba(30,30,30,.55);background:rgba(245,242,234,.55);padding:6px 9px;pointer-events:none}
+  #stats{position:fixed;z-index:4;right:18px;bottom:18px;min-width:160px;font-size:9px;line-height:1.55;letter-spacing:1px;color:rgba(30,30,30,.66);background:rgba(245,242,234,.65);border:1px solid rgba(0,0,0,.08);padding:9px 11px;backdrop-filter:blur(8px);pointer-events:none}
+  #stats b{font-weight:700;color:rgba(10,10,10,.78)}
+
+  /* ---- poster chrome (ink mode) ---- */
+  #poster-overlay{display:none;pointer-events:none}
+  body.ink #poster-overlay{display:block}
+  body.ink header{display:none}
+  body.ink #stats{right:72px}
+  body.ink #status{right:76px}
+  .po-top{position:fixed;z-index:6;top:0;left:0;right:56px;height:42px;background:var(--barink);color:var(--barpaper);display:flex;align-items:center;justify-content:space-between;padding:0 26px;font-size:11px;font-weight:700;letter-spacing:2px}
+  .po-top .po-orange{color:var(--accent)}
+  .po-title{position:fixed;z-index:6;top:56px;left:26px}
+  .po-title h1{margin:0;font-family:Helvetica,Arial,sans-serif;font-weight:900;font-size:44px;letter-spacing:-1px;color:var(--barink)}
+  body.ink-night .po-title h1{color:#d8d4c8}
+  .po-title div{margin-top:4px;font-size:10px;font-weight:700;letter-spacing:2px;color:var(--barink);opacity:.8}
+  body.ink-night .po-title div{color:#d8d4c8}
+  .po-side{position:fixed;z-index:6;top:0;right:0;bottom:0;width:56px;background:var(--accent);color:var(--barink)}
+  .po-side span:first-child{position:absolute;top:12px;left:0;right:0;text-align:center;font-family:Helvetica,Arial,sans-serif;font-weight:900;font-size:24px}
+  .po-side-text{position:absolute;top:120px;left:50%;transform:translateX(-50%) rotate(90deg);transform-origin:center;white-space:nowrap;font-size:10px;font-weight:700;letter-spacing:2px}
+  .po-bottom{position:fixed;z-index:6;bottom:0;left:0;right:56px;height:46px;background:var(--barink);color:var(--barpaper);display:flex;align-items:center;gap:26px;padding:0 0 0 0;font-size:11px;font-weight:700;letter-spacing:2px}
+  .po-badge{width:86px;height:46px;background:var(--accent);color:var(--barink);display:flex;align-items:center;justify-content:center;font-family:Helvetica,Arial,sans-serif;font-weight:900;font-size:26px}
+  .po-sys{margin-left:auto;margin-right:22px;font-family:Helvetica,Arial,sans-serif;font-weight:900;font-size:18px}
+  body.ink #bottom{bottom:58px}
+  body.ink #help{bottom:112px}
+  body.ink #stats{bottom:58px}
+
+  @media(max-width:720px){
+    #panel{left:10px;right:10px;width:auto;top:58px;max-height:62vh}
+    header{left:12px;top:12px}
+    #status,#stats{display:none}
+    #help{bottom:68px;white-space:nowrap;font-size:8px}
+    #bottom{bottom:10px;width:calc(100% - 20px);justify-content:center;overflow:auto}
+    #bottom button{padding:0 10px;flex:0 0 auto}
+    .po-title h1{font-size:28px}
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="viewport"></div>
+  <header><div class="title">GENERATIVE ANTITECTURE</div><div class="sub">CITY ENGINE · MODEL → GEOMETRY → RENDER</div></header>
+  <div id="status">READY</div>
+
+  <div id="poster-overlay">
+    <div class="po-top"><span id="po-spec">SPECIMEN 0000 : QUARTER</span><span>&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;</span><span class="po-orange" id="po-sector">MIXED SECTOR / DAYLIGHT</span></div>
+    <div class="po-title"><h1 id="po-title">Stadtviertel</h1><div id="po-taxo">QUARTER / MIXED FABRIC</div></div>
+    <div class="po-side"><span id="po-num">17</span><span class="po-side-text" id="po-sidetext">GENERATIVE ANTITECTURE / CITYMODEL</span></div>
+    <div class="po-bottom"><span class="po-badge" id="po-num2">17</span><span id="po-typeword">QUARTER</span><span>SHEET 1 / 1 &nbsp; &gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;</span><span class="po-sys" id="po-sys">IS-00000A</span></div>
+  </div>
+
+  <aside id="panel">
+    <div class="panel-hd"><span>CITY PARAMETERS</span><span>v2.0</span></div>
+    <div class="row"><label>MODE</label><select id="mode"><option value="ink" selected>INK / POSTER</option><option value="solid">SOLID</option></select></div>
+    <div class="row"><label>PALETTE</label><select id="palette"><option value="concrete">CONCRETE</option><option value="warm">WARM URBAN</option><option value="cool">COOL METRO</option><option value="nocturne">NOCTURNE</option></select></div>
+    <div class="row"><label>MASSING</label><select id="massing"><option value="mixed">MIXED</option><option value="core">DOWNTOWN CORE</option><option value="euro">EURO BLOCKS</option><option value="lowrise">LOW-RISE</option><option value="industrial">INDUSTRIAL</option></select></div>
+    <div class="row"><label>LAND</label><select id="land"><option value="flat">FLAT</option><option value="river">RIVER</option><option value="coast">COAST</option><option value="island">ISLAND</option></select></div>
+    <div class="row"><label>AIR</label><select id="air"><option value="none">NONE</option><option value="sparse" selected>SPARSE</option><option value="busy">BUSY</option></select></div>
+    <div class="row"><label>RAIL</label><select id="rail"><option value="none">NONE</option><option value="metro">METRO</option><option value="elevated">ELEVATED</option><option value="terminal">TERMINAL</option></select></div>
+    <div class="row"><label>SECTOR</label><select id="sector"><option value="mixed">MIXED</option><option value="residential">RESIDENTIAL</option><option value="commercial">COMMERCIAL</option><option value="industrial">INDUSTRIAL</option><option value="civic">CIVIC</option></select></div>
+    <div class="row"><label>SKY</label><select id="sky"><option value="day">DAYLIGHT</option><option value="dusk">DUSK</option><option value="night">NOCTURNE</option></select></div>
+    <div class="row"><label>DETAIL</label><select id="detail"><option value="low">LOW</option><option value="med" selected>MEDIUM</option><option value="high">HIGH</option></select></div>
+    <div class="row"><label>DENSITY</label><select id="density"><option value="low">LOW</option><option value="med" selected>MEDIUM</option><option value="high">HIGH</option><option value="extreme">EXTREME</option></select></div>
+    <div class="row"><label>SEED</label><input id="seed" value="RANDOM" spellcheck="false" /></div>
+    <div class="row"><label>ROTATION</label><select id="rotation"><option value="on" selected>ON</option><option value="off">OFF</option></select></div>
+    <div class="row"><label>CITY LIFE</label><select id="life"><option value="off">OFF</option><option value="low" selected>LOW</option><option value="high">HIGH</option></select></div>
+    <div class="row"><label>ORBIT SPEED</label><select id="orbit"><option value="slow">SLOW</option><option value="normal" selected>NORMAL</option><option value="fast">FAST</option></select></div>
+    <div class="panel-actions"><button id="resetView">RESET VIEW</button><button id="newSeed">NEW SEED</button><button id="draw" class="primary">DRAW</button></div>
+  </aside>
+
+  <div id="help">DRAG TO ORBIT · WHEEL/PINCH TO ZOOM · RIGHT-DRAG TO PAN</div>
+  <div id="bottom"><button id="options">OPTIONS</button><button id="generate" class="primary">GENERATE</button><button id="fit">FIT</button><button id="save">SAVE PNG</button></div>
+  <div id="stats"></div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
