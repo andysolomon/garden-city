@@ -10,12 +10,17 @@
 
 import * as THREE from 'three';
 import { RNG } from './rng.js';
-import { CITY_SIZE } from './model.js';
+import { CITY_SIZE, railRuns } from './model.js';
 
 export const INK_THEMES = {
-  day:   { paper: 0xeae6dd, ink: 0x1c1a18, road: 0xded7c7, park: 0xdcd6c2, plaza: 0xe4dfd2, water: 0xaabfc5, accent: 0xe8501e },
-  night: { paper: 0x101014, ink: 0xd8d4c8, road: 0x1a1a20, park: 0x171d18, plaza: 0x18181d, water: 0x1e3e50, accent: 0xf06632 },
+  day:   { paper: 0xeae6dd, ink: 0x1c1a18, road: 0xded7c7, park: 0xdcd6c2, plaza: 0xe4dfd2, water: 0xaabfc5, accent: 0xe8501e, dark: false },
+  dusk:  { paper: 0xe6d8c3, ink: 0x33241d, road: 0xd8c7ab, park: 0xcfc2a1, plaza: 0xdfd2ba, water: 0xb3a6ad, accent: 0xd8451a, dark: false },
+  night: { paper: 0x101014, ink: 0xd8d4c8, road: 0x1a1a20, park: 0x171d18, plaza: 0x18181d, water: 0x1e3e50, accent: 0xf06632, dark: true },
 };
+
+export function themeFor(config) {
+  return INK_THEMES[config.sky] || INK_THEMES.day;
+}
 
 const TINTS = [0xe8724a, 0x8aa07a, 0xc8a060, 0xb05540];
 
@@ -94,8 +99,8 @@ function instancedBoxes(specs, material) {
 export function renderInk(viewer, model) {
   viewer.clearWorld();
   const cfg = model.config;
-  const night = cfg.sky === 'night';
-  const T = night ? INK_THEMES.night : INK_THEMES.day;
+  const T = themeFor(cfg);
+  const night = T.dark;
 
   // Transparent WebGL clear; the paper tone comes from the page behind the
   // canvas, which also lets the poster export show its watermark through.
@@ -228,20 +233,42 @@ export function renderInk(viewer, model) {
 function renderInkRail(world, model, main, faint, T) {
   const r = model.rail;
   if (!r) return;
-  const y = r.elevated ? 15 : 2.1, len = CITY_SIZE * 1.03;
-  if (r.vertical) {
-    main.seg(r.offset - 5.2, y, -len / 2, r.offset - 5.2, y, len / 2);
-    main.seg(r.offset + 5.2, y, -len / 2, r.offset + 5.2, y, len / 2);
-    for (let z = -len / 2; z < len / 2; z += 18) faint.seg(r.offset - 8, y - .3, z, r.offset + 8, y - .3, z);
-  } else {
-    main.seg(-len / 2, y, r.offset - 5.2, len / 2, y, r.offset - 5.2);
-    main.seg(-len / 2, y, r.offset + 5.2, len / 2, y, r.offset + 5.2);
-    for (let x = -len / 2; x < len / 2; x += 18) faint.seg(x, y - .3, r.offset - 8, x, y - .3, r.offset + 8);
+  const y = r.elevated ? 15 : 2.1;
+  // Map an along-axis coordinate + lateral offset onto world [x, z].
+  const P = (q, o) => (r.vertical ? [r.offset + o, q] : [q, r.offset + o]);
+  const line = (L, q0, q1, o, yy) => {
+    const [x0, z0] = P(q0, o), [x1, z1] = P(q1, o);
+    L.seg(x0, yy, z0, x1, yy, z1);
+  };
+  const cross = (L, q, o0, o1, yy) => {
+    const [x0, z0] = P(q, o0), [x1, z1] = P(q, o1);
+    L.seg(x0, yy, z0, x1, yy, z1);
+  };
+  const boxAt = (L, q, qlen, o, olen, h, yy) => {
+    const [x, z] = P(q, o);
+    L.box(x, yy, z, r.vertical ? olen : qlen, h, r.vertical ? qlen : olen, 0);
+  };
+
+  for (const [a, b] of railRuns(r)) {
+    line(main, a, b, -5.2, y);
+    line(main, a, b, 5.2, y);
+    for (let q = a; q < b; q += 18) cross(faint, q, -8, 8, y - .3);
   }
   if (r.elevated) {
-    for (let q = -CITY_SIZE * .42; q < CITY_SIZE * .42; q += 70) {
-      if (r.vertical) main.box(r.offset - 4, 0, q, 8, 14, 8, 0);
-      else main.box(q, 0, r.offset - 4, 8, 14, 8, 0);
+    for (let q = r.extent.from; q < r.extent.to; q += 70) boxAt(main, q, 8, -4, 8, 14, 0);
+  }
+  if (r.crossing === 'viaduct') {
+    for (const s of r.spans) {
+      boxAt(main, s.from, s.to - s.from, -8, 16, 2.2, y - 2.6);
+      for (let q = s.from + 8; q < s.to - 8; q += 26) boxAt(main, q, 6, -5, 10, y - 2.6, 0);
+    }
+  }
+  if (r.crossing === 'tunnel') {
+    for (const s of r.spans) {
+      boxAt(main, s.from - 6, 6, -9, 18, 7, 0);   // portal head-walls
+      boxAt(main, s.to, 6, -9, 18, 7, 0);
+      // dashed subsurface alignment, in the language of the basement outlines
+      for (let q = s.from; q < s.to; q += 16) line(faint, q, Math.min(q + 9, s.to), 0, -9);
     }
   }
   if (r.station) {
@@ -285,15 +312,17 @@ const TITLES = {
 export function posterMeta(model) {
   const r = new RNG(model.seed + ':meta');
   const [title, taxo, type] = TITLES[model.config.massing] || TITLES.mixed;
+  const T = themeFor(model.config);
   return {
-    title, taxo, type,
+    title, taxo, type, theme: T,
+    skyLabel: { day: 'DAYLIGHT', dusk: 'DUSK', night: 'NOCTURNE' }[model.config.sky] || 'DAYLIGHT',
     num: r.int(10, 99),
     spec: r.int(1000, 9999),
     sysId: 'IS-' + r.int(10000, 99999) + r.pick(['A', 'B', 'C', 'E']),
     az: r.int(0, 359), el: r.int(20, 60),
     footfall: r.int(20, 90),
     sub: r.int(40, 80),
-    night: model.config.sky === 'night',
+    night: T.dark,
     sector: model.config.sector.toUpperCase(),
   };
 }
@@ -301,8 +330,10 @@ export function posterMeta(model) {
 export function updateOverlay(model) {
   const m = posterMeta(model);
   const $ = id => document.getElementById(id);
+  // Poster chrome text takes the ink colour of the active theme.
+  document.documentElement.style.setProperty('--po-ink', '#' + m.theme.ink.toString(16).padStart(6, '0'));
   $('po-spec').textContent = `SPECIMEN ${m.spec} : ${m.type}`;
-  $('po-sector').textContent = `${m.sector} SECTOR / ${m.night ? 'NOCTURNE' : 'DAYLIGHT'}`;
+  $('po-sector').textContent = `${m.sector} SECTOR / ${m.skyLabel}`;
   $('po-title').textContent = m.title;
   $('po-taxo').textContent = m.taxo;
   $('po-num').textContent = m.num;

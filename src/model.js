@@ -23,6 +23,27 @@ function intersects(a, b, pad = 0) {
          a.z < b.z + b.d + pad && a.z + a.d > b.z - pad;
 }
 
+// Trim `p` back to the largest sub-rectangle clear of `r`, rather than
+// discarding the whole parcel. A corridor should consume its right-of-way
+// plus a setback, not every lot it happens to touch.
+function trimAgainst(p, r, pad = 2, minSide = 11) {
+  if (!p || !intersects(p, r, pad)) return p;
+  const rx0 = r.x - pad, rx1 = r.x + r.w + pad;
+  const rz0 = r.z - pad, rz1 = r.z + r.d + pad;
+  const options = [
+    { ...p, w: rx0 - p.x },                        // keep the strip west of r
+    { ...p, x: rx1, w: p.x + p.w - rx1 },          // east
+    { ...p, d: rz0 - p.z },                        // north
+    { ...p, z: rz1, d: p.z + p.d - rz1 },          // south
+  ];
+  let best = null;
+  for (const o of options) {
+    if (o.w < minSide || o.d < minSide) continue;
+    if (!best || o.w * o.d > best.w * best.d) best = o;
+  }
+  return best; // null → the corridor really does consume the lot
+}
+
 export function generateCity(config) {
   const rng = new RNG(config.seed + ':city');
   const dcfg = DENSITY[config.density];
@@ -152,9 +173,16 @@ export function generateCity(config) {
       };
       model.parcels.push(p);
       // STEP 2b: parcels inside a reserved corridor (rail, station) stay empty.
-      if (model.reserved.some(r => intersects(p, r, 2))) continue;
-      if (rng.bool(config.density === 'low' ? .12 : .045)) { vacants.push(p); continue; }
-      addBuilding(p);
+      // STEP 2b: a reserved corridor takes its right-of-way out of the lot;
+      // whatever usable frontage is left still gets built on.
+      let usable = p;
+      for (const r of model.reserved) {
+        usable = trimAgainst(usable, r);
+        if (!usable) break;
+      }
+      if (!usable) continue;
+      if (rng.bool(config.density === 'low' ? .12 : .045)) { vacants.push(usable); continue; }
+      addBuilding(usable);
     }
   }
 
@@ -296,6 +324,28 @@ function planRail(kind, model, rng) {
     rail.station = s;
     model.reserved.push({ x: s.x - 6, z: s.z - 6, w: s.w + 12, d: s.d + 12 });
   }
+
+  // Where the line meets water: an elevated line carries a viaduct across,
+  // an at-grade metro tunnels under, and open sea truncates it at the shore.
+  // `extent` is measured along the line's own axis.
+  const half = CITY_SIZE * .515;
+  rail.extent = { from: -half, to: half };
+  rail.spans = [];
+
+  const coast = model.water.find(w => w.type === 'coast');
+  const sea = model.water.find(w => w.type === 'sea');
+
+  if (river && !vertical) rail.spans.push({ from: river.x - 9, to: river.x + river.w + 9 });
+  if (coast && !vertical) rail.extent.from = Math.max(rail.extent.from, coast.x + coast.w + 22);
+  if (sea) {
+    const rx = CITY_SIZE * .43, rz = CITY_SIZE * .38;
+    const q = 1 - (offset / (vertical ? rx : rz)) ** 2;
+    if (q > .02) {
+      const chord = (vertical ? rz : rx) * Math.sqrt(q);
+      rail.extent = { from: -chord, to: chord };
+    }
+  }
+  rail.crossing = rail.spans.length ? (elevated ? 'viaduct' : 'tunnel') : 'none';
   model.rail = rail;
 }
 
@@ -307,6 +357,21 @@ function chooseLandmark(model, blocksRaw, rng, config) {
   if (!candidates.length) candidates = free.filter(b => b.dist < .42 && Math.min(b.w, b.d) > 44);
   if (!candidates.length) return;
   rng.pick(candidates).landmark = true;
+}
+
+// The continuous runs of track, along the line's own axis: a tunnelled
+// crossing removes its span from the surface alignment, everything else
+// stays whole.
+export function railRuns(r) {
+  const runs = [];
+  let cursor = r.extent.from;
+  const cuts = r.crossing === 'tunnel' ? r.spans : [];
+  for (const s of cuts) {
+    if (s.from > cursor) runs.push([cursor, Math.min(s.from, r.extent.to)]);
+    cursor = Math.max(cursor, s.to);
+  }
+  if (cursor < r.extent.to) runs.push([cursor, r.extent.to]);
+  return runs;
 }
 
 function pickZone(sector, dist, rng) {

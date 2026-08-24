@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { mat, addBox } from './render.js';
 import { hashSeed } from './rng.js';
-import { CITY_SIZE } from './model.js';
+import { CITY_SIZE, railRuns } from './model.js';
 
 const palettes = {
   concrete: { bg: 0xd8d2c5, ground: 0xc7c1b5, road: 0x77736d, roadLine: 0xe8dcc2, water: 0x78919c, park: 0x8d967b, build: [0xc7bfae, 0xa9aaa6, 0x998f83, 0xd0c5ad, 0x8f9698], accent: 0xe8501e },
@@ -118,26 +118,41 @@ export function renderSolid(viewer, model) {
   renderDrones(world, model, pal);
 }
 
+// The line is described along its own axis; `seg` maps an along-axis run and
+// a lateral offset onto world x/z depending on the line's orientation.
 function renderRail(world, model, pal, cfg) {
   const r = model.rail;
   if (!r) return;
-  const y = r.elevated ? 15 : 2.1, len = CITY_SIZE * 1.03;
+  const y = r.elevated ? 15 : 2.1;
   const railMat = mat(0x3d3d40, .45);
   const sleeperMat = mat(0x75695d, .9);
-  if (r.vertical) {
-    addBox(world, { x: r.offset - 6, z: -len / 2, w: 1.6, d: len, h: 1 }, railMat, y);
-    addBox(world, { x: r.offset + 4.4, z: -len / 2, w: 1.6, d: len, h: 1 }, railMat, y);
-    if (cfg.detail !== 'low') for (let z = -len / 2; z < len / 2; z += 14) addBox(world, { x: r.offset - 8, z, w: 16, d: 1.8, h: .7 }, sleeperMat, y - .3);
-  } else {
-    addBox(world, { x: -len / 2, z: r.offset - 6, w: len, d: 1.6, h: 1 }, railMat, y);
-    addBox(world, { x: -len / 2, z: r.offset + 4.4, w: len, d: 1.6, h: 1 }, railMat, y);
-    if (cfg.detail !== 'low') for (let x = -len / 2; x < len / 2; x += 14) addBox(world, { x, z: r.offset - 8, w: 1.8, d: 16, h: .7 }, sleeperMat, y - .3);
+  const supportMat = mat(0x8e8a83);
+  const seg = (q, qlen, o, olen, h, material, yy) => {
+    if (qlen <= 0) return;
+    addBox(world, r.vertical
+      ? { x: r.offset + o, z: q, w: olen, d: qlen, h }
+      : { x: q, z: r.offset + o, w: qlen, d: olen, h }, material, yy);
+  };
+
+  for (const [a, b] of railRuns(r)) {
+    seg(a, b - a, -6, 1.6, 1, railMat, y);
+    seg(a, b - a, 4.4, 1.6, 1, railMat, y);
+    if (cfg.detail !== 'low') for (let q = a; q < b; q += 14) seg(q, 1.8, -8, 16, .7, sleeperMat, y - .3);
   }
+
   if (r.elevated) {
-    const supportMat = mat(0x8e8a83);
-    for (let q = -CITY_SIZE * .42; q < CITY_SIZE * .42; q += 70) {
-      const spec = r.vertical ? { x: r.offset - 4, z: q, w: 8, d: 8, h: 14 } : { x: q, z: r.offset - 4, w: 8, d: 8, h: 14 };
-      addBox(world, spec, supportMat, 0);
+    for (let q = r.extent.from; q < r.extent.to; q += 70) seg(q, 8, -4, 8, 14, supportMat, 0);
+  }
+  if (r.crossing === 'viaduct') {
+    for (const s of r.spans) {
+      seg(s.from, s.to - s.from, -8, 16, 2.2, supportMat, y - 2.6);          // deck
+      for (let q = s.from + 8; q < s.to - 8; q += 26) seg(q, 6, -5, 10, y - 2.6, supportMat, 0); // piers
+    }
+  }
+  if (r.crossing === 'tunnel') {
+    for (const s of r.spans) {                                              // portals at each bank
+      seg(s.from - 6, 6, -9, 18, 7, supportMat, 0);
+      seg(s.to, 6, -9, 18, 7, supportMat, 0);
     }
   }
   if (r.station) {

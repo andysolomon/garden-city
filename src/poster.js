@@ -3,17 +3,17 @@
 // Unlike the original, the metadata panels report real CityModel statistics.
 
 import { RNG } from './rng.js';
-import { posterMeta } from './ink.js';
+import { posterMeta, themeFor } from './ink.js';
 
 const W = 1654, H = 2339; // A-series @2x
 
 export function exportPoster(viewer, model) {
   const m = posterMeta(model);
   const r = new RNG(model.seed + ':frame');
-  const NIGHT = m.night;
-  const PAPER = NIGHT ? '#101014' : '#eae6dd';
-  const INK = NIGHT ? '#d8d4c8' : '#1c1a18';
-  const ORANGE = '#e8501e';
+  const T = themeFor(model.config);
+  const hex = v => '#' + v.toString(16).padStart(6, '0');
+  const NIGHT = T.dark;
+  const PAPER = hex(T.paper), INK = hex(T.ink), ORANGE = hex(T.accent);
 
   const cv = document.createElement('canvas');
   cv.width = W; cv.height = H;
@@ -59,7 +59,7 @@ export function exportPoster(viewer, model) {
   g.fillText(`SPECIMEN ${m.spec} : ${m.type}`, 40, 36);
   g.fillText('>>>>>>>>>>>>>', 660, 36);
   g.fillStyle = ORANGE;
-  g.fillText(`${m.sector} SECTOR / ${NIGHT ? 'NOCTURNE' : 'DAYLIGHT'}`, W - 460, 36);
+  g.fillText(`${m.sector} SECTOR / ${m.skyLabel}`, W - 460, 36);
 
   // ---- title + metadata ----------------------------------------------------
   g.fillStyle = INK;
@@ -136,7 +136,7 @@ export function exportPoster(viewer, model) {
   const conf = [
     ['MODE', m.type], ['MASSING', cfg.massing.toUpperCase()], ['LAND', cfg.land.toUpperCase()],
     ['RAIL', cfg.rail.toUpperCase()], ['SECTOR', cfg.sector.toUpperCase()],
-    ['SKY', NIGHT ? 'NOCTURNE' : cfg.sky.toUpperCase()], ['DENSITY', cfg.density.toUpperCase()],
+    ['SKY', m.skyLabel], ['DENSITY', cfg.density.toUpperCase()],
   ];
   conf.forEach(([k, v], i) => {
     g.fillText(k, 1180, fy + 58 + i * 20);
