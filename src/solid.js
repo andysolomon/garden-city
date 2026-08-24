@@ -1,9 +1,13 @@
 // Solid renderer: shaded massing view of a CityModel.
+//
+// V2: grounds (roads, parks, plazas) are flat polygon meshes, roads get round
+// junction caps, and buildings/landmarks are yawed by their `angle`.
 
 import * as THREE from 'three';
-import { mat, addBox } from './render.js';
+import { mat, addBox, flatPolygonsGeometry } from './render.js';
 import { hashSeed } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
+import { orientedRect } from './geom.js';
 
 const palettes = {
   concrete: { bg: 0xd8d2c5, ground: 0xc7c1b5, road: 0x77736d, roadLine: 0xe8dcc2, water: 0x78919c, park: 0x8d967b, build: [0xc7bfae, 0xa9aaa6, 0x998f83, 0xd0c5ad, 0x8f9698], accent: 0xe8501e },
@@ -11,6 +15,25 @@ const palettes = {
   cool:     { bg: 0xd7dde0, ground: 0xbcc5c6, road: 0x606a70, roadLine: 0xdde7e8, water: 0x5f879d, park: 0x82988c, build: [0x8da3ac, 0xaebcc0, 0x6f858d, 0xc1c8c5, 0x667178], accent: 0xd85b37 },
   nocturne: { bg: 0x0b0e13, ground: 0x151a20, road: 0x262c33, roadLine: 0x89919a, water: 0x1e3e50, park: 0x253d32, build: [0x343a42, 0x48464c, 0x2d3640, 0x555156, 0x242b31], accent: 0xf06632 },
 };
+
+function groundMesh(world, polys, material, y) {
+  if (!polys.length) return;
+  material.side = THREE.DoubleSide;
+  const m = new THREE.Mesh(flatPolygonsGeometry(polys, y), material);
+  m.receiveShadow = true;
+  world.add(m);
+}
+
+// Oriented box helper: centre (cx, cz), yaw `angle` of the w-axis.
+function addOBox(group, spec, material, y = 0) {
+  const geo = new THREE.BoxGeometry(spec.w, spec.h, spec.d);
+  const m = new THREE.Mesh(geo, material);
+  m.position.set(spec.cx, y + spec.h / 2, spec.cz);
+  m.rotation.y = -(spec.angle || 0);
+  m.castShadow = true; m.receiveShadow = true;
+  group.add(m);
+  return m;
+}
 
 export function renderSolid(viewer, model) {
   viewer.clearWorld();
@@ -25,6 +48,7 @@ export function renderSolid(viewer, model) {
   sun.color.set(cfg.sky === 'dusk' ? 0xffc28f : cfg.sky === 'night' ? 0x9bb5dc : 0xffffff);
 
   const groundMat = mat(pal.ground);
+  const gy = model.water.some(w => w.type === 'sea') ? 1.2 : 0; // lift grounds above the island disc
   const ground = new THREE.Mesh(new THREE.BoxGeometry(CITY_SIZE + 90, 7, CITY_SIZE + 90), groundMat);
   ground.position.y = -4;
   ground.receiveShadow = true;
@@ -36,47 +60,48 @@ export function renderSolid(viewer, model) {
         new THREE.MeshStandardMaterial({ color: pal.water, roughness: .35, metalness: .05, transparent: true, opacity: .78 }));
       water.position.y = 1;
       world.add(water);
-      const island = new THREE.Mesh(new THREE.CylinderGeometry(CITY_SIZE * .42, CITY_SIZE * .45, 6, 64), groundMat);
-      island.scale.z = .9;
-      island.position.y = 2.6;
+      const rx = w.rx ?? CITY_SIZE * .43, rz = w.rz ?? CITY_SIZE * .38;
+      const island = new THREE.Mesh(new THREE.CylinderGeometry(rx, rx * 1.06, 6, 64), groundMat);
+      island.scale.z = rz / rx;
+      island.position.y = -.8;
       world.add(island);
     } else {
       addBox(world, { ...w, h: 2 }, new THREE.MeshStandardMaterial({ color: pal.water, roughness: .35, transparent: true, opacity: .82 }), 1);
     }
   }
 
+  // Roads: ribbons + caps as one flat mesh per class.
   const roadMat = mat(pal.road);
   const arterialMat = mat(new THREE.Color(pal.road).multiplyScalar(.82));
-  for (const r of model.roads) addBox(world, { ...r, h: 1.2 }, r.type === 'arterial' ? arterialMat : roadMat, .35);
+  groundMesh(world, model.roads.filter(r => r.type !== 'arterial').map(r => r.polygon).concat(model.roadCaps.filter(c => !c.elevated).map(c => c.polygon)), roadMat, gy + 1.5);
+  groundMesh(world, model.roads.filter(r => r.type === 'arterial').map(r => r.polygon), arterialMat, gy + 1.55);
 
-  // Bridges: deck + parapets + bank piers.
+  // Bridges: deck + parapets + bank piers, oriented along the span.
   const deckMat = mat(new THREE.Color(pal.road).multiplyScalar(1.08), .7);
   const pierMat = mat(0x8e8a83);
   for (const b of model.bridges) {
-    addBox(world, { ...b, h: 2.4 }, deckMat, 3.4);
-    addBox(world, { x: b.x, z: b.z + .4, w: b.w, d: 1.1, h: 2.2 }, deckMat, 5.8);
-    addBox(world, { x: b.x, z: b.z + b.d - 1.5, w: b.w, d: 1.1, h: 2.2 }, deckMat, 5.8);
-    addBox(world, { x: b.x + 1, z: b.z + 2, w: 3.5, d: b.d - 4, h: 4 }, pierMat, 0);
-    addBox(world, { x: b.x + b.w - 4.5, z: b.z + 2, w: 3.5, d: b.d - 4, h: 4 }, pierMat, 0);
+    const c = Math.cos(b.angle), s = Math.sin(b.angle);
+    const off = (u, v) => ({ cx: b.cx + u * c - v * s, cz: b.cz + u * s + v * c });
+    addOBox(world, { ...off(0, 0), w: b.len, d: b.width, h: 2.4, angle: b.angle }, deckMat, 3.4);
+    addOBox(world, { ...off(0, b.width / 2 - .95), w: b.len, d: 1.1, h: 2.2, angle: b.angle }, deckMat, 5.8);
+    addOBox(world, { ...off(0, -b.width / 2 + .95), w: b.len, d: 1.1, h: 2.2, angle: b.angle }, deckMat, 5.8);
+    addOBox(world, { ...off(-b.len / 2 + 2.75, 0), w: 3.5, d: b.width - 4, h: 4, angle: b.angle }, pierMat, 0);
+    addOBox(world, { ...off(b.len / 2 - 2.75, 0), w: 3.5, d: b.width - 4, h: 4, angle: b.angle }, pierMat, 0);
   }
 
   if (cfg.detail !== 'low') {
     const lm = new THREE.MeshBasicMaterial({ color: pal.roadLine, transparent: true, opacity: .62 });
-    for (const r of model.roads.filter(r => r.type === 'arterial')) {
-      const horizontal = r.w > r.d;
-      const spec = horizontal
-        ? { x: r.x, z: r.z + r.d / 2 - .45, w: r.w, d: .9, h: .12 }
-        : { x: r.x + r.w / 2 - .45, z: r.z, w: .9, d: r.d, h: .12 };
-      addBox(world, spec, lm, 1.05);
-    }
+    const lines = model.roads.filter(r => r.type === 'arterial').map(r => orientedRect(r.cx, r.cz, r.len - r.width, .9, r.angle));
+    groundMesh(world, lines, lm, gy + 1.7);
   }
 
   const parkMat = mat(pal.park);
-  for (const p of model.parks) addBox(world, { ...p, h: 1.3 }, parkMat, .75);
+  groundMesh(world, model.parks.filter(p => !p.field).map(p => p.polygon), parkMat, gy + 1.6);
+  groundMesh(world, model.parks.filter(p => p.field).map(p => p.polygon), mat(new THREE.Color(pal.park).lerp(new THREE.Color(pal.ground), .55)), gy + 1.4);
   const plazaMat = mat(new THREE.Color(pal.ground).multiplyScalar(1.08));
-  for (const p of model.plazas) addBox(world, { ...p, h: 1.5 }, plazaMat, .75);
+  groundMesh(world, model.plazas.map(p => p.polygon), plazaMat, gy + 1.6);
 
-  // Buildings, grouped by color into instanced meshes.
+  // Buildings, grouped by color into instanced meshes; yawed by `angle`.
   const groups = new Map();
   model.buildings.forEach((b, i) => {
     const color = pal.build[hashSeed(b.zone + b.style + i) % pal.build.length];
@@ -90,9 +115,9 @@ export function renderSolid(viewer, model) {
     im.castShadow = true;
     im.receiveShadow = true;
     arr.forEach((b, i) => {
-      dummy.position.set(b.x + b.w / 2, (b.y || 0) + b.h / 2, b.z + b.d / 2);
+      dummy.position.set(b.cx, (b.y || 0) + b.h / 2, b.cz);
       dummy.scale.set(b.w, b.h, b.d);
-      dummy.rotation.set(0, 0, 0);
+      dummy.rotation.set(0, -(b.angle || 0), 0);
       dummy.updateMatrix();
       im.setMatrixAt(i, dummy.matrix);
     });
@@ -103,7 +128,7 @@ export function renderSolid(viewer, model) {
 
   const accentMat = mat(pal.accent, .7);
   for (const l of model.landmarks) {
-    addBox(world, { x: l.x - l.w / 2, z: l.z - l.d / 2, w: l.w, d: l.d, h: l.h }, accentMat, 0);
+    addOBox(world, { cx: l.x, cz: l.z, w: l.w, d: l.d, h: l.h, angle: l.angle }, accentMat, 0);
     if (cfg.detail === 'high') {
       const spire = new THREE.Mesh(new THREE.ConeGeometry(l.w * .18, l.h * .35, 8), accentMat);
       spire.position.set(l.x, l.h + l.h * .175, l.z);

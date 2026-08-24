@@ -114,3 +114,30 @@ export function addBox(group, spec, material, y = 0) {
   group.add(m);
   return m;
 }
+
+// One BufferGeometry for many flat polygons (roads, parks, blocks…) lying in
+// the XZ plane at height y. Triangulated with earcut via ShapeUtils; concave
+// simple polygons are fine. Keeps ground fills to one draw call per layer.
+export function flatPolygonsGeometry(polys, y = 0) {
+  const pos = [], idx = [];
+  let base = 0;
+  for (const poly of polys) {
+    if (!poly || poly.length < 3) continue;
+    const contour = poly.map(p => new THREE.Vector2(p[0], p[1]));
+    const tris = THREE.ShapeUtils.triangulateShape(contour, []);
+    for (const [x, z] of poly) pos.push(x, y, z);
+    for (const t of tris) idx.push(base + t[0], base + t[2], base + t[1]);
+    base += poly.length;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+export function polygonMesh(polys, material, y = 0) {
+  const m = new THREE.Mesh(flatPolygonsGeometry(polys, y), material);
+  m.receiveShadow = true;
+  return m;
+}
