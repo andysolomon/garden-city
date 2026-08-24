@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Contact Sheet — City Engine</title>
+<style>
+  body{margin:0;background:#0d0e10;color:#e8e5dd;font:10px "Courier New",monospace;letter-spacing:1.5px}
+  header{display:flex;gap:14px;align-items:center;padding:12px 18px;border-bottom:1px solid #30343c}
+  select,input,button{background:#101216;color:#e5e1d7;border:1px solid #343841;font:10px "Courier New",monospace;height:28px;padding:0 8px}
+  button.primary{background:#e8501e;color:#161616;border-color:#e8501e;font-weight:700}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;padding:14px}
+  .cell{background:#15171b;border:1px solid #30343c;padding:6px}
+  .cell canvas{display:block;width:100%;aspect-ratio:1;background:#f1eee6}
+  .cell div{margin-top:5px;color:#858b96;display:flex;justify-content:space-between}
+</style>
+</head>
+<body>
+<header>
+  <b>CONTACT SHEET</b>
+  <label>PATTERN <select id="pattern"><option value="all">ALL</option><option>manhattan</option><option>paris</option><option>tokyo</option><option>medieval</option><option>atlanta</option></select></label>
+  <label>LAND <select id="land"><option>flat</option><option>river</option><option>coast</option><option>island</option></select></label>
+  <label>DENSITY <select id="density"><option>low</option><option selected>med</option><option>high</option><option>extreme</option></select></label>
+  <label>SEEDS <input id="count" value="15" size="3" /></label>
+  <label>PREFIX <input id="prefix" value="CS" size="5" /></label>
+  <button id="go" class="primary">RENDER</button>
+  <span id="status"></span>
+</header>
+<div id="grid"></div>
+<script type="module">
+  import { generateCity } from './src/model.js';
+  import { drawMap, LAYERS } from './src/map.js';
+  const $ = id => document.getElementById(id);
+  const layers = Object.fromEntries(LAYERS.map(([k]) => [k, ['water', 'buildings', 'edges', 'spurs', 'blocks'].includes(k)]));
+  const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
+  function render() {
+    const grid = $('grid'); grid.innerHTML = '';
+    const n = Math.max(1, +$('count').value | 0), pat = $('pattern').value;
+    let i = 0;
+    const t0 = performance.now();
+    const step = () => {
+      if (i >= n) { $('status').textContent = `${n} CITIES / ${((performance.now() - t0) / n).toFixed(0)} MS EACH`; return; }
+      const pattern = pat === 'all' ? PATTERNS[i % PATTERNS.length] : pat;
+      const seed = `${$('prefix').value}${i}`;
+      const m = generateCity({ seed, engine: 'graph', pattern, land: $('land').value, density: $('density').value, massing: 'mixed', sector: 'mixed', rail: 'none', detail: 'med', life: 'off', air: 'none', sky: 'day' });
+      const cell = document.createElement('div'); cell.className = 'cell';
+      const cv = document.createElement('canvas'); cv.width = 520; cv.height = 520;
+      drawMap(cv.getContext('2d'), m, 520, 520, layers);
+      const info = document.createElement('div');
+      info.innerHTML = `<span>${pattern.toUpperCase()} · ${seed}</span><span>${m.blocks.length} BLK · ${m.buildings.length} BLD · ${m.stats.landlocked} LL</span>`;
+      cell.append(cv, info); grid.appendChild(cell);
+      i++; setTimeout(step, 0);
+    };
+    step();
+  }
+  $('go').onclick = render;
+  render();
+</script>
+</body>
+</html>

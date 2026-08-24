@@ -90,8 +90,10 @@
   </div>
 
   <aside id="panel">
-    <div class="panel-hd"><span>CITY PARAMETERS</span><span>v2.0</span></div>
-    <div class="row"><label>MODE</label><select id="mode"><option value="ink" selected>INK / POSTER</option><option value="solid">SOLID</option></select></div>
+    <div class="panel-hd"><span>CITY PARAMETERS</span><span>v2.1</span></div>
+    <div class="row"><label>MODE</label><select id="mode"><option value="ink" selected>INK / POSTER</option><option value="solid">SOLID</option><option value="map">MAP / DEBUG</option></select></div>
+    <div class="row"><label>ENGINE</label><select id="engine"><option value="graph" selected>ROAD GRAPH</option><option value="bsp">SUBDIVISION (V1)</option></select></div>
+    <div class="row"><label>PATTERN</label><select id="pattern"><option value="manhattan" selected>MANHATTAN</option><option value="paris">PARIS</option><option value="tokyo">TOKYO</option><option value="medieval">MEDIEVAL</option><option value="atlanta">ATLANTA</option></select></div>
     <div class="row"><label>PALETTE</label><select id="palette"><option value="concrete">CONCRETE</option><option value="warm">WARM URBAN</option><option value="cool">COOL METRO</option><option value="nocturne">NOCTURNE</option></select></div>
     <div class="row"><label>MASSING</label><select id="massing"><option value="mixed">MIXED</option><option value="core">DOWNTOWN CORE</option><option value="euro">EURO BLOCKS</option><option value="lowrise">LOW-RISE</option><option value="industrial">INDUSTRIAL</option></select></div>
     <div class="row"><label>LAND</label><select id="land"><option value="flat">FLAT</option><option value="river">RIVER</option><option value="coast">COAST</option><option value="island">ISLAND</option></select></div>
@@ -108,7 +110,7 @@
     <div class="panel-actions"><button id="resetView">RESET VIEW</button><button id="newSeed">NEW SEED</button><button id="draw" class="primary">DRAW</button></div>
   </aside>
 
-  <div id="help">DRAG TO ORBIT · WHEEL/PINCH TO ZOOM · RIGHT-DRAG TO PAN</div>
+  <div id="help">DRAG TO ORBIT · WHEEL/PINCH TO ZOOM · RIGHT-DRAG TO PAN · <a href="contact.html" style="color:inherit;pointer-events:auto">CONTACT SHEET</a></div>
   <div id="bottom"><button id="options">OPTIONS</button><button id="generate" class="primary">GENERATE</button><button id="fit">FIT</button><button id="save">SAVE PNG</button></div>
   <div id="stats"></div>
 </div>

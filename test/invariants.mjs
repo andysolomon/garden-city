@@ -1,0 +1,150 @@
+// Invariant harness for the road-graph engine (docs/V2-ROAD-GRAPH.md §8).
+// Run: npm test   (node ≥ 18, no dependencies)
+//
+// Generates ~100 cities spanning every pattern / land / density / rail combo
+// and asserts the eight invariants on each. Exits non-zero on any failure.
+
+import { generateCity } from '../src/model.js';
+import { resolvePreset } from '../src/presets.js';
+import { hashSeed } from '../src/rng.js';
+import { VIRTUAL } from '../src/graph.js';
+import {
+  segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect,
+} from '../src/geom.js';
+
+const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
+const LANDS = ['flat', 'river', 'coast', 'island'];
+const DENS = ['low', 'med', 'high', 'extreme'];
+const RAILS = ['none', 'metro', 'elevated', 'terminal'];
+const N = Number(process.argv[2] || 100);
+
+const failures = [];
+const totals = { faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 };
+
+function check(seed, cond, msg) { if (!cond) failures.push(`${seed}: ${msg}`); }
+
+for (let i = 0; i < N; i++) {
+  const config = {
+    seed: `T${i}`, engine: 'graph',
+    pattern: PATTERNS[i % PATTERNS.length], land: LANDS[(i >> 1) % LANDS.length],
+    density: DENS[(i >> 3) % DENS.length], rail: RAILS[(i >> 2) % RAILS.length],
+    massing: ['mixed', 'core', 'euro', 'lowrise', 'industrial'][i % 5], sector: 'mixed',
+    detail: 'med', life: 'low', air: 'sparse',
+  };
+  const t0 = performance.now();
+  const m = generateCity(config);
+  totals.ms += performance.now() - t0;
+  const seed = `${config.seed}/${config.pattern}/${config.land}/${config.density}/${config.rail}`;
+  const g = m.graph, P = resolvePreset(config.pattern);
+  const live = g.edges.map((e, id) => ({ ...e, id })).filter(e => !e.removed);
+
+  // 1. Planarity: no two live edges share a point other than a common endpoint.
+  {
+    const cell = 40, grid = new Map();
+    const key = (x, z) => `${x},${z}`;
+    for (const e of live) {
+      const a = g.nodes[e.a], b = g.nodes[e.b];
+      for (let cx = Math.floor(Math.min(a.x, b.x) / cell); cx <= Math.floor(Math.max(a.x, b.x) / cell); cx++)
+        for (let cz = Math.floor(Math.min(a.z, b.z) / cell); cz <= Math.floor(Math.max(a.z, b.z) / cell); cz++) {
+          const k = key(cx, cz);
+          if (!grid.has(k)) grid.set(k, []);
+          grid.get(k).push(e);
+        }
+    }
+    const tested = new Set();
+    let bad = 0;
+    for (const arr of grid.values()) for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
+      const p = arr[i], q = arr[j], pk = p.id < q.id ? `${p.id}-${q.id}` : `${q.id}-${p.id}`;
+      if (tested.has(pk)) continue;
+      tested.add(pk);
+      const a = g.nodes[p.a], b = g.nodes[p.b], c = g.nodes[q.a], d = g.nodes[q.b];
+      if (segmentsTouch(a.x, a.z, b.x, b.z, c.x, c.z, d.x, d.z)) { bad++; if (bad <= 3) failures.push(`${seed}: edges ${p.id} and ${q.id} intersect`); }
+    }
+  }
+
+  // 2. Node spacing: no two live nodes closer than snapRadius.
+  {
+    const liveNode = new Uint8Array(g.nodes.length);
+    for (const e of live) { liveNode[e.a] = 1; liveNode[e.b] = 1; }
+    const cell = P.snapRadius, buckets = new Map();
+    let bad = 0;
+    for (let n = 0; n < g.nodes.length; n++) {
+      if (!liveNode[n]) continue;
+      const p = g.nodes[n], cx = Math.floor(p.x / cell), cz = Math.floor(p.z / cell);
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+        const arr = buckets.get(`${cx + dx},${cz + dz}`);
+        if (arr) for (const o of arr) {
+          const q = g.nodes[o];
+          if (Math.hypot(p.x - q.x, p.z - q.z) < P.snapRadius - 1e-6) { bad++; if (bad <= 3) failures.push(`${seed}: nodes ${n} and ${o} are ${Math.hypot(p.x - q.x, p.z - q.z).toFixed(2)} apart`); }
+        }
+      }
+      const k = `${cx},${cz}`;
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k).push(n);
+    }
+  }
+
+  // 3. Faces simple with positive area under CCW winding.
+  for (const f of m.faces) {
+    check(seed, signedArea(f.polygon) > 0, `face ${f.id} not CCW`);
+    check(seed, isSimple(f.polygon), `face ${f.id} not simple`);
+    check(seed, f.edges.length === f.polygon.length, `face ${f.id} edge/vertex mismatch`);
+  }
+
+  // 4. Area conservation: faces tile the region enclosed by the kept component.
+  {
+    const sum = m.faces.reduce((s, f) => s + f.area, 0);
+    const expect = config.land === 'island' ? area(m.fields.water.shores[0].pts) : m.size * m.size;
+    check(seed, Math.abs(sum - expect) / expect < 0.005 || m.stats.degenerateFaces > 0, `face areas sum to ${sum.toFixed(0)} vs ${expect.toFixed(0)}`);
+    totals.degenerate += m.stats.degenerateFaces;
+  }
+
+  // 5. Parcels lie inside their block; Σ parcel areas ≤ buildable area.
+  {
+    const perBlock = new Map();
+    for (const p of m.parcels) {
+      const B = p.block.buildable;
+      for (const [x, z] of p.polygon) {
+        check(seed, pointInPolygon(x, z, B) || distToBoundary(x, z, B) < 1e-3, `parcel vertex outside block`);
+      }
+      perBlock.set(p.block, (perBlock.get(p.block) || 0) + area(p.polygon));
+    }
+    for (const [b, a] of perBlock) check(seed, a <= area(b.buildable) * (1 + 1e-6), `parcel area ${a.toFixed(0)} exceeds block ${area(b.buildable).toFixed(0)}`);
+  }
+
+  // 6. Every built parcel has frontage.
+  for (const p of m.parcels) if (p.built) check(seed, !!p.frontage, 'built parcel without frontage');
+
+  // 7. No building in water or inside a reserved corridor.
+  for (const b of m.buildings) {
+    for (const [x, z] of orientedRect(b.cx, b.cz, b.w, b.d, b.angle)) {
+      check(seed, m.fields.water.isLand(x, z), `building at ${x.toFixed(0)},${z.toFixed(0)} in water`);
+      for (const r of m.reserved) check(seed, !(x > r.x + .5 && x < r.x + r.w - .5 && z > r.z + .5 && z < r.z + r.d - .5), `building corner inside reserved corridor`);
+    }
+  }
+
+  // 8. Determinism.
+  {
+    const ser = mm => JSON.stringify({
+      n: mm.graph.nodes, e: mm.graph.edges.map(e => [e.a, e.b, e.cls, e.removed]),
+      b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle]), c: mm.cars.map(c => [c.x, c.z]),
+    });
+    const h1 = hashSeed(ser(m)), h2 = hashSeed(ser(generateCity({ ...config })));
+    check(seed, h1 === h2, 'non-deterministic');
+  }
+
+  totals.faces += m.faces.length; totals.blocks += m.blocks.length; totals.offsetDrops += m.stats.offsetDrops;
+  totals.parcels += m.parcels.length; totals.landlocked += m.stats.landlocked; totals.slivers += m.stats.slivers;
+  totals.buildings += m.buildings.length;
+}
+
+const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';
+console.log(`cities: ${N}  avg ${(totals.ms / N).toFixed(0)}ms`);
+console.log(`faces ${totals.faces}  blocks ${totals.blocks}  offset drops ${pct(totals.offsetDrops, totals.blocks)}  degenerate faces ${totals.degenerate}`);
+console.log(`parcels ${totals.parcels}  landlocked ${pct(totals.landlocked, totals.parcels)}  slivers dropped ${totals.slivers}  buildings ${totals.buildings}`);
+if (failures.length) {
+  console.log(`\n${failures.length} FAILURES`);
+  for (const f of failures.slice(0, 40)) console.log('  ' + f);
+  process.exit(1);
+}
+console.log('all invariants hold');

@@ -1,0 +1,9 @@
+{
+  "name": "garden-city",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test/invariants.mjs",
+    "serve": "./serve.sh"
+  }
+}

@@ -2,8 +2,36 @@
 
 Design plan for replacing rectangular subdivision with a planar road graph.
 
-Status: **proposed, not started.** Current engine (v2 commit `7900151`) still
-uses recursive rectangular subdivision.
+Status: **implemented (P0–P5).** The road graph is the default engine;
+the V1 subdivision generator remains behind `config.engine = 'bsp'`.
+
+Where things live:
+
+| Piece | File |
+|---|---|
+| Geometry kernel (orientation predicate, quantization, polygon ops, multi-piece half-plane split) | `src/geom.js` |
+| Fields: water SDF from shore polylines, population, blended-angle direction, exclusion | `src/fields.js` |
+| Flat graph + spatial hashes, growth loop, local constraints, face extraction | `src/graph.js` |
+| Per-edge inward offset, OBB parcel split, frontage, building fit | `src/blocks.js` |
+| Graph fabric: fields → growth → faces → blocks → parcels → buildings | `src/fabric.js` |
+| Morphology presets (manhattan / paris / tokyo / medieval / atlanta) | `src/presets.js` |
+| Top-down debug map with layer toggles | `src/map.js` (MODE → MAP / DEBUG) |
+| Contact sheet (N seeds as thumbnails) | `contact.html` |
+| Invariant harness, 100 seeds | `test/invariants.mjs` (`npm test`) |
+
+Deviations from the plan below, all deliberate:
+- The city boundary square and every shoreline are inserted into the graph as
+  zero-width `boundary` / `shore` edges before growth, so streets snap to,
+  split and T-junction onto them like any other edge and every face closes.
+  Water faces are discarded by centroid; bridges are committed at proposal
+  time by scanning the water SDF along the ray (§4 step 1).
+- Only the largest connected component is kept before face extraction
+  (an island's fabric is not attached to the boundary square).
+- Parcel splitting uses a multi-piece half-plane clip instead of
+  Sutherland–Hodgman — SH stitches disjoint pieces of a concave block
+  together, which the parcel-inside-block invariant caught on seed T8.
+- Landlocked parcels become courtyards (rendered as quiet park fill) rather
+  than being merged; the rate is ~5% across the harness.
 
 ---
 
