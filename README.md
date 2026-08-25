@@ -71,3 +71,7 @@ Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 - Every random draw comes from a seeded, namespaced stream
   (`seed + ':city'`, `':ink'`, `':meta'`, …) so the same seed always
   reproduces the same city in every renderer.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
