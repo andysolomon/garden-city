@@ -8,6 +8,35 @@ Current state: V2 (planar road graph) is complete and merged. The engine
 generates five distinguishable street morphologies, all nine invariants hold
 over 100 seeds, and both renderers plus the poster export work end to end.
 
+**The work is sliced into 16 independently-grabbable issues.** Each is a thin
+vertical cut through model → renderer → invariant, demoable on its own:
+[#5 is the tracking PRD](https://github.com/andysolomon/garden-city/issues/5).
+Pick up anything not blocked; one slice = one branch = one PR with
+`Closes #<n>` in the body.
+
+| Track | Slices | Section |
+|---|---|---|
+| **R** Routing & traffic | [#6](../../issues/6) R1 · [#7](../../issues/7) R2 · [#8](../../issues/8) R3 · [#9](../../issues/9) R4 · [#10](../../issues/10) R5 | §4.1 |
+| **P** Perimeter blocks | [#11](../../issues/11) P1 · [#12](../../issues/12) P2 | §4.2 |
+| **T** Direction field | [#13](../../issues/13) T1 *(HITL)* · [#14](../../issues/14) T2 | §4.3 |
+| **E** Terrain | [#15](../../issues/15) E1 · [#16](../../issues/16) E2 · [#17](../../issues/17) E3 *(HITL)* | §4.4 |
+| **X** Residuals | [#18](../../issues/18) X1 · [#19](../../issues/19) X2 · [#20](../../issues/20) X3 · [#21](../../issues/21) X4 | §5 |
+
+```
+R1 ──┬── R2 ── R3          P1 ── P2       T1 ── T2       E1 ── E2 ── E3
+     │    └─── R5(opt)
+     └── R4                        X1  X2  X3  X4  (independent)
+```
+
+No track blocks another. Six slices are unblocked right now: **R1, P1, T1, E1,
+X1–X4**. Two are HITL (T1's acceptance is an aesthetic judgement; E3 is an
+architectural decision); the rest can be run and merged unattended.
+
+**Sequencing:** T1, T2 and E2 all change street geometry, so every city shifts
+under them, while P1–P2 and R2–R5 are judged on the contact sheet. Land the
+geometry-changing slices either before or after the visual ones — interleaving
+means judging the same work twice.
+
 ---
 
 ## 1. Orientation
