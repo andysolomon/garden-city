@@ -59,10 +59,11 @@ Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 
 ## Roadmap
 
+- **[ROADMAP.md](ROADMAP.md) — remaining work.** Start here if you are picking
+  this up: orientation, the invariants that must not break, and the prioritized
+  task list (routing/traffic first).
 - [V2: The Road Graph](docs/V2-ROAD-GRAPH.md) — planar road graph engine
   (implemented; the doc records the design and where it deviates)
-- V2.1: polygon building footprints (perimeter blocks), terrain heightfield,
-  tensor-field upgrade of `direction()`
 
 ## Design rules
 
