@@ -34,6 +34,7 @@ function rerender() {
   document.body.classList.toggle('ink', ink);
   document.body.classList.toggle('ink-night', ink && model.config.sky === 'night');
   document.body.classList.toggle('map', mode === 'map');
+  if (mode === 'map') viewer.clearWorld();
   map.setModel(model, model.config.sky);
   map.show(mode === 'map');
   if (ink) { renderInk(viewer, model); updateOverlay(model); }

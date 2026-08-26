@@ -8,6 +8,7 @@ import { mat, addBox, flatPolygonsGeometry } from './render.js';
 import { hashSeed } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
 import { orientedRect } from './geom.js';
+import { positionOnRoute } from './routing.js';
 
 const palettes = {
   concrete: { bg: 0xd8d2c5, ground: 0xc7c1b5, road: 0x77736d, roadLine: 0xe8dcc2, water: 0x78919c, park: 0x8d967b, build: [0xc7bfae, 0xa9aaa6, 0x998f83, 0xd0c5ad, 0x8f9698], accent: 0xe8501e },
@@ -139,7 +140,7 @@ export function renderSolid(viewer, model) {
   renderRail(world, model, pal, cfg);
   renderCranes(world, model);
   renderTrees(world, model, pal);
-  renderCars(world, model, pal);
+  renderCars(viewer, model, pal);
   renderDrones(world, model, pal);
 }
 
@@ -212,20 +213,27 @@ function renderTrees(world, model, pal) {
   world.add(trunk, crown);
 }
 
-function renderCars(world, model, pal) {
+function renderCars(viewer, model, pal) {
   if (!model.cars.length) return;
+  const { world } = viewer;
   const geo = new THREE.BoxGeometry(6, 2.4, 3.2);
   const im = new THREE.InstancedMesh(geo, mat(pal.accent, .55), model.cars.length);
   const d = new THREE.Object3D();
-  model.cars.forEach((c, i) => {
-    d.position.set(c.x, c.bridge ? 6.9 : 2.3, c.z);
-    d.rotation.set(0, c.rot, 0);
-    d.scale.set(c.s, c.s, c.s);
-    d.updateMatrix();
-    im.setMatrixAt(i, d.matrix);
-  });
-  im.instanceMatrix.needsUpdate = true;
+  const update = elapsed => {
+    model.cars.forEach((c, i) => {
+      const p = c.path && model.graph ? positionOnRoute(model.graph, c, elapsed) : c;
+      d.position.set(p.x, p.bridge ? 6.9 : 2.3, p.z);
+      d.rotation.set(0, p.rot, 0);
+      d.scale.set(c.s, c.s, c.s);
+      d.updateMatrix();
+      im.setMatrixAt(i, d.matrix);
+    });
+    im.instanceMatrix.needsUpdate = true;
+  };
+  update(0);
+  im.frustumCulled = false;
   world.add(im);
+  if (model.cars.some(c => c.path)) viewer.setAnimation(update);
 }
 
 function renderDrones(world, model, pal) {

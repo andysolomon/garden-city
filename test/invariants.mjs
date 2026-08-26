@@ -2,14 +2,16 @@
 // Run: npm test   (node ≥ 18, no dependencies)
 //
 // Generates ~100 cities spanning every pattern / land / density / rail combo
-// and asserts the eight invariants on each. Exits non-zero on any failure.
+// and asserts fabric plus route-aware traffic invariants on each. Exits
+// non-zero on any failure.
 
 import { generateCity } from '../src/model.js';
 import { resolvePreset } from '../src/presets.js';
 import { hashSeed } from '../src/rng.js';
 import { VIRTUAL } from '../src/graph.js';
+import { buildDrivableAdjacency, shortestPath, positionOnRoute } from '../src/routing.js';
 import {
-  segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect,
+  segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
 } from '../src/geom.js';
 
 const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
@@ -22,6 +24,48 @@ const failures = [];
 const totals = { corridorLen: [], faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 };
 
 function check(seed, cond, msg) { if (!cond) failures.push(`${seed}: ${msg}`); }
+
+function routeHasTurn(g, car) {
+  for (let i = 1; i < car.nodes.length - 1; i++) {
+    const a = g.nodes[car.nodes[i - 1]], b = g.nodes[car.nodes[i]], c = g.nodes[car.nodes[i + 1]];
+    const cross = (b.x - a.x) * (c.z - b.z) - (b.z - a.z) * (c.x - b.x);
+    const scale = Math.hypot(b.x - a.x, b.z - a.z) * Math.hypot(c.x - b.x, c.z - b.z);
+    if (Math.abs(cross) > scale * .08) return true;
+  }
+  return false;
+}
+
+function checkTraffic(seed, m) {
+  const g = m.graph;
+  const adjacency = buildDrivableAdjacency(g);
+  for (let node = 0; node < adjacency.length; node++) for (const step of adjacency[node]) {
+    const edge = g.edges[step.edge];
+    check(seed, !edge.removed && !VIRTUAL.has(edge.cls), `adjacency contains non-drivable edge ${step.edge}`);
+    check(seed, edge.a === node || edge.b === node, `adjacency edge ${step.edge} is not incident to node ${node}`);
+  }
+
+  let turns = 0;
+  for (const [ci, car] of m.cars.entries()) {
+    check(seed, Array.isArray(car.path) && car.path.length > 1, `car ${ci} has no drivable route`);
+    check(seed, car.nodes.length === car.path.length + 1, `car ${ci} route node/edge mismatch`);
+    check(seed, !!car.originCorridor && !!car.destinationCorridor && car.originCorridorId !== car.destinationCorridorId, `car ${ci} lacks distinct named corridors`);
+    for (let i = 0; i < car.path.length; i++) {
+      const edge = g.edges[car.path[i]];
+      check(seed, !!edge && !edge.removed && !VIRTUAL.has(edge.cls), `car ${ci} uses non-drivable edge ${car.path[i]}`);
+      check(seed, edge && ((edge.a === car.nodes[i] && edge.b === car.nodes[i + 1]) || (edge.b === car.nodes[i] && edge.a === car.nodes[i + 1])), `car ${ci} route disconnects at edge ${i}`);
+    }
+    const reroute = shortestPath(g, car.nodes[0], car.nodes.at(-1), adjacency);
+    check(seed, !!reroute && JSON.stringify(reroute.path) === JSON.stringify(car.path), `car ${ci} path is not deterministic shortest route`);
+    for (const elapsed of [0, 7.25, 31.5, 93]) {
+      const p = positionOnRoute(g, car, elapsed), edge = g.edges[p.edge];
+      const a = g.nodes[edge.a], b = g.nodes[edge.b];
+      const clearance = pointSegDist(p.x, p.z, a.x, a.z, b.x, b.z).d;
+      check(seed, clearance <= edge.width / 2 + 1e-7, `car ${ci} leaves road clearance at t=${elapsed}`);
+    }
+    if (routeHasTurn(g, car)) turns++;
+  }
+  if (m.cars.length) check(seed, turns > 0, 'no routed car turns at an intersection');
+}
 
 for (let i = 0; i < N; i++) {
   const config = {
@@ -142,11 +186,16 @@ for (let i = 0; i < N; i++) {
     for (const e of live) if (!VIRTUAL.has(e.cls)) check(seed, seen.has(e.id), `edge ${e.id} in no corridor`);
   }
 
-  // 8. Determinism.
+  // 10-12. Routed traffic uses only live real edges, stays within road
+  // clearance while moving, and includes an intersection turn.
+  checkTraffic(seed, m);
+
+  // 8 + 13. City and traffic determinism.
   {
     const ser = mm => JSON.stringify({
       n: mm.graph.nodes, e: mm.graph.edges.map(e => [e.a, e.b, e.cls, e.removed]),
-      b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle]), c: mm.cars.map(c => [c.x, c.z]),
+      b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle]),
+      c: mm.cars.map(c => [c.x, c.z, c.rot, c.path, c.nodes, c.routeLength, c.t, c.speed, c.originCorridor, c.originCorridorId, c.destinationCorridor, c.destinationCorridorId]),
     });
     const h1 = hashSeed(ser(m)), h2 = hashSeed(ser(generateCity({ ...config })));
     check(seed, h1 === h2, 'non-deterministic');
@@ -157,6 +206,20 @@ for (let i = 0; i < N; i++) {
   totals.buildings += m.buildings.length;
   const lens = m.corridors.filter(c => c.cls === 'arterial').map(c => c.length).sort((a, b) => a - b);
   if (lens.length) totals.corridorLen.push(lens[lens.length >> 1]);
+}
+
+// Focused life/land matrix: off remains empty, while low/high traffic routes
+// are valid and reproducible for every supported terrain.
+for (const [li, land] of LANDS.entries()) for (const life of ['off', 'low', 'high']) {
+  const config = {
+    seed: `TRAFFIC-${land}-${life}`, engine: 'graph', pattern: PATTERNS[li], land,
+    density: 'med', rail: 'none', massing: 'mixed', sector: 'mixed', detail: 'med', life, air: 'sparse',
+  };
+  const m = generateCity(config), seed = `${config.seed}/${config.pattern}`;
+  if (life === 'off') check(seed, m.cars.length === 0, 'life=off generated cars');
+  else checkTraffic(seed, m);
+  const cars = mm => JSON.stringify(mm.cars.map(c => [c.x, c.z, c.rot, c.path, c.nodes, c.t, c.speed]));
+  check(seed, hashSeed(cars(m)) === hashSeed(cars(generateCity({ ...config }))), `non-deterministic ${life} traffic`);
 }
 
 const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';

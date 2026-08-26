@@ -22,6 +22,7 @@ import { RNG } from './rng.js';
 import { CITY_SIZE, DENSITY, intersects, pickZone, massBuilding } from './common.js';
 import { graphFabric } from './fabric.js';
 import { rectPoly, bbox, pointInPolygon } from './geom.js';
+import { buildDrivableAdjacency, shortestPath, positionOnRoute } from './routing.js';
 
 export { CITY_SIZE } from './common.js';
 
@@ -345,10 +346,33 @@ function chooseLandmark(model, blocksRaw, rng) {
 }
 
 // ---------------------------------------------------------------------------
-// Life: cars ride the road axes (either engine); trees densify parks.
+// Life: graph cars follow deterministic routes; BSP cars retain their static
+// road-axis placement. Trees and air keep their established :city draw order.
 // ---------------------------------------------------------------------------
 function addLife(level, model, rng) {
   if (level === 'off') return;
+  if (model.engine === 'graph' && model.graph) {
+    addRoutedCars(level, model, new RNG(model.seed + ':traffic'));
+    // Before routing, graph cars drew from :city. Consume the old sequence so
+    // trees and air remain byte-identical outside the new traffic namespace.
+    consumeLegacyCarDraws(level, model, rng);
+  } else {
+    addStaticCars(level, model, rng);
+  }
+  if (level === 'high') {
+    for (const p of model.parks) {
+      if (p.field || p.court) continue;
+      for (let i = 0, tries = 0; i < 5 && tries < 30; tries++) {
+        const x = rng.float(p.x, p.x + p.w), z = rng.float(p.z, p.z + p.d);
+        if (!pointInPolygon(x, z, p.polygon)) continue;
+        model.trees.push({ x, z, s: rng.float(.65, 1.2) });
+        i++;
+      }
+    }
+  }
+}
+
+function addStaticCars(level, model, rng) {
   const pool = model.roads.concat(model.bridges);
   const carCount = level === 'high' ? 120 : 38;
   for (let i = 0; i < carCount && pool.length; i++) {
@@ -363,17 +387,62 @@ function addLife(level, model, rng) {
       rot: -r.angle, s: rng.float(.85, 1.15), bridge: model.bridges.includes(r),
     });
   }
-  if (level === 'high') {
-    for (const p of model.parks) {
-      if (p.field || p.court) continue;
-      for (let i = 0, tries = 0; i < 5 && tries < 30; tries++) {
-        const x = rng.float(p.x, p.x + p.w), z = rng.float(p.z, p.z + p.d);
-        if (!pointInPolygon(x, z, p.polygon)) continue;
-        model.trees.push({ x, z, s: rng.float(.65, 1.2) });
-        i++;
-      }
-    }
+}
+
+function consumeLegacyCarDraws(level, model, rng) {
+  const pool = model.roads.concat(model.bridges);
+  const carCount = level === 'high' ? 120 : 38;
+  for (let i = 0; i < carCount && pool.length; i++) {
+    const r = rng.pick(pool);
+    if (r.len < 14) continue;
+    rng.float(6 / r.len, 1 - 6 / r.len);
+    rng.float(-r.width * .25, r.width * .25);
+    rng.float(.85, 1.15);
   }
+}
+
+function addRoutedCars(level, model, rng) {
+  const graph = model.graph;
+  const corridors = (model.corridors || []).filter(c => c.name && c.nodeIds.length > 1 && c.edgeIds.length);
+  if (corridors.length < 2) return;
+  const adjacency = buildDrivableAdjacency(graph);
+  const carCount = level === 'high' ? 120 : 38;
+
+  for (let i = 0; i < carCount; i++) {
+    let selected = null;
+    const attempts = i === 0 ? 24 : 6;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const origin = rng.pick(corridors);
+      let destination = rng.pick(corridors);
+      if (destination.id === origin.id) destination = corridors[(corridors.indexOf(origin) + 1 + rng.int(0, corridors.length - 2)) % corridors.length];
+      const start = rng.pick(origin.nodeIds), goal = rng.pick(destination.nodeIds);
+      const route = shortestPath(graph, start, goal, adjacency);
+      if (!route || route.edges.length < 2 || route.length < 18) continue;
+      const candidate = { origin, destination, route };
+      if (!selected || route.edges.length > selected.route.edges.length) selected = candidate;
+      if (i !== 0 || routeTurns(graph, route)) { selected = candidate; break; }
+    }
+    if (!selected) continue;
+    const { origin, destination, route } = selected;
+    const car = {
+      path: route.edges, nodes: route.nodes, routeLength: route.length,
+      t: rng.float(0, route.length), speed: rng.float(5.5, 9.5), s: rng.float(.85, 1.15),
+      originCorridor: origin.name, originCorridorId: origin.id,
+      destinationCorridor: destination.name, destinationCorridorId: destination.id,
+    };
+    Object.assign(car, positionOnRoute(graph, car, 0));
+    model.cars.push(car);
+  }
+}
+
+function routeTurns(graph, route) {
+  for (let i = 1; i < route.nodes.length - 1; i++) {
+    const a = graph.nodes[route.nodes[i - 1]], b = graph.nodes[route.nodes[i]], c = graph.nodes[route.nodes[i + 1]];
+    const cross = (b.x - a.x) * (c.z - b.z) - (b.z - a.z) * (c.x - b.x);
+    const scale = Math.hypot(b.x - a.x, b.z - a.z) * Math.hypot(c.x - b.x, c.z - b.z);
+    if (Math.abs(cross) > scale * .08) return true;
+  }
+  return false;
 }
 
 function addAir(level, model, rng) {
