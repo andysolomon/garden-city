@@ -17,6 +17,7 @@ import { RNG } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
 import { flatPolygonsGeometry } from './render.js';
 import { orientedRect } from './geom.js';
+import { positionOnRoute } from './routing.js';
 
 export const INK_THEMES = {
   day:   { paper: 0xeae6dd, ink: 0x1c1a18, road: 0xded7c7, park: 0xdcd6c2, plaza: 0xe4dfd2, water: 0xaabfc5, accent: 0xe8501e, dark: false },
@@ -258,6 +259,7 @@ export function renderInk(viewer, model) {
     faint.ring(t.x, 9.5 * t.s, t.z, 4.2 * t.s, 7);
   }
   for (const c of model.cars) {
+    if (c.path) continue;
     const y = c.bridge ? 5.6 : .2;
     faint.obox(c.x, y, c.z, 6 * c.s, 2.4 * c.s, 3.2 * c.s, -c.rot, 0);
   }
@@ -269,6 +271,33 @@ export function renderInk(viewer, model) {
   world.add(main.build(T.ink, .92));
   world.add(faint.build(T.ink, .38));
   world.add(accent.build(T.accent, .95));
+  renderMovingInkCars(viewer, model, T);
+}
+
+function renderMovingInkCars(viewer, model, T) {
+  const cars = model.cars.filter(c => c.path);
+  if (!cars.length || !model.graph) return;
+  const mesh = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(6, 2.4, 3.2),
+    new THREE.MeshBasicMaterial({ color: T.ink, wireframe: true, transparent: true, opacity: .72 }),
+    cars.length,
+  );
+  const d = new THREE.Object3D();
+  const update = elapsed => {
+    cars.forEach((car, i) => {
+      const p = positionOnRoute(model.graph, car, elapsed);
+      d.position.set(p.x, p.bridge ? 6.8 : 1.4, p.z);
+      d.rotation.set(0, p.rot, 0);
+      d.scale.set(car.s, car.s, car.s);
+      d.updateMatrix();
+      mesh.setMatrixAt(i, d.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+  };
+  update(0);
+  mesh.frustumCulled = false;
+  viewer.world.add(mesh);
+  viewer.setAnimation(update);
 }
 
 // The two kerb lines of a road/bridge axis, inset by `inset` from the edge.

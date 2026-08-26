@@ -45,9 +45,11 @@ export class Viewer {
     this.resize();
 
     this.timer = new THREE.Timer();
-    const loop = () => {
+    this.animation = null;
+    const loop = time => {
       requestAnimationFrame(loop);
       this.timer.update();
+      this.animation?.(time / 1000);
       this.controls.update(this.timer.getDelta());
       this.renderer.render(this.scene, this.camera);
     };
@@ -55,6 +57,7 @@ export class Viewer {
   }
 
   clearWorld() {
+    this.setAnimation(null);
     while (this.world.children.length) {
       const o = this.world.children.pop();
       o.traverse?.(n => {
@@ -62,6 +65,15 @@ export class Viewer {
         if (n.material) (Array.isArray(n.material) ? n.material : [n.material]).forEach(m => m.dispose?.());
       });
     }
+  }
+
+  // Install one renderer-owned per-frame update. The callback receives time
+  // since installation, so rerendering restarts motion without mutating the
+  // deterministic CityModel.
+  setAnimation(update) {
+    if (!update) { this.animation = null; return; }
+    const start = performance.now() / 1000;
+    this.animation = now => update(Math.max(0, now - start));
   }
 
   setFrustum(aspect) {
