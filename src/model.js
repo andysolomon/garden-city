@@ -413,8 +413,9 @@ function addRoutedCars(level, model, rng) {
     const attempts = i === 0 ? 24 : 6;
     for (let attempt = 0; attempt < attempts; attempt++) {
       const origin = rng.pick(corridors);
-      let destination = rng.pick(corridors);
-      if (destination.id === origin.id) destination = corridors[(corridors.indexOf(origin) + 1 + rng.int(0, corridors.length - 2)) % corridors.length];
+      const destinations = corridors.filter(c => c.id !== origin.id && c.name !== origin.name);
+      if (!destinations.length) continue;
+      const destination = rng.pick(destinations);
       const start = rng.pick(origin.nodeIds), goal = rng.pick(destination.nodeIds);
       const route = shortestPath(graph, start, goal, adjacency);
       if (!route || route.edges.length < 2 || route.length < 18) continue;

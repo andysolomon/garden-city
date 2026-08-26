@@ -47,20 +47,37 @@ function checkTraffic(seed, m) {
   let turns = 0;
   for (const [ci, car] of m.cars.entries()) {
     check(seed, Array.isArray(car.path) && car.path.length > 1, `car ${ci} has no drivable route`);
-    check(seed, car.nodes.length === car.path.length + 1, `car ${ci} route node/edge mismatch`);
-    check(seed, !!car.originCorridor && !!car.destinationCorridor && car.originCorridorId !== car.destinationCorridorId, `car ${ci} lacks distinct named corridors`);
+    check(seed, Array.isArray(car.nodes) && car.nodes.length === car.path.length + 1, `car ${ci} route node/edge mismatch`);
+    check(seed, Number.isFinite(car.routeLength) && car.routeLength > 0, `car ${ci} has invalid route length`);
+    check(seed, Number.isFinite(car.t) && car.t >= 0 && car.t <= car.routeLength, `car ${ci} has invalid distance progress`);
+    check(seed, Number.isFinite(car.speed) && car.speed > 0, `car ${ci} has invalid speed`);
+    check(seed, [car.x, car.z, car.rot].every(Number.isFinite), `car ${ci} has invalid current transform`);
+    check(seed, typeof car.originCorridor === 'string' && typeof car.destinationCorridor === 'string'
+      && car.originCorridor !== car.destinationCorridor && car.originCorridorId !== car.destinationCorridorId,
+    `car ${ci} lacks distinct named corridors`);
+    const origin = m.corridors.find(c => c.id === car.originCorridorId && c.name === car.originCorridor);
+    const destination = m.corridors.find(c => c.id === car.destinationCorridorId && c.name === car.destinationCorridor);
+    check(seed, !!origin && origin.nodeIds.includes(car.nodes[0]), `car ${ci} start is not on its origin corridor`);
+    check(seed, !!destination && destination.nodeIds.includes(car.nodes.at(-1)), `car ${ci} end is not on its destination corridor`);
+    const distance = car.path.reduce((sum, edge) => sum + g.edgeLength(edge), 0);
+    check(seed, Math.abs(distance - car.routeLength) < 1e-7, `car ${ci} route length does not match path`);
     for (let i = 0; i < car.path.length; i++) {
-      const edge = g.edges[car.path[i]];
+      const edgeId = car.path[i], edge = g.edges[edgeId];
+      check(seed, Number.isInteger(edgeId) && edgeId >= 0 && edgeId < g.edges.length, `car ${ci} has invalid edge id ${edgeId}`);
       check(seed, !!edge && !edge.removed && !VIRTUAL.has(edge.cls), `car ${ci} uses non-drivable edge ${car.path[i]}`);
       check(seed, edge && ((edge.a === car.nodes[i] && edge.b === car.nodes[i + 1]) || (edge.b === car.nodes[i] && edge.a === car.nodes[i + 1])), `car ${ci} route disconnects at edge ${i}`);
     }
     const reroute = shortestPath(g, car.nodes[0], car.nodes.at(-1), adjacency);
     check(seed, !!reroute && JSON.stringify(reroute.path) === JSON.stringify(car.path), `car ${ci} path is not deterministic shortest route`);
+    const atStart = positionOnRoute(g, car, 0);
+    check(seed, Math.hypot(atStart.x - car.x, atStart.z - car.z) < 1e-7 && Math.abs(atStart.rot - car.rot) < 1e-7, `car ${ci} current transform is not its route position`);
     for (const elapsed of [0, 7.25, 31.5, 93]) {
       const p = positionOnRoute(g, car, elapsed), edge = g.edges[p.edge];
+      check(seed, car.path.includes(p.edge) && [p.x, p.z, p.rot].every(Number.isFinite), `car ${ci} has invalid sampled transform at t=${elapsed}`);
+      if (!edge) continue;
       const a = g.nodes[edge.a], b = g.nodes[edge.b];
       const clearance = pointSegDist(p.x, p.z, a.x, a.z, b.x, b.z).d;
-      check(seed, clearance <= edge.width / 2 + 1e-7, `car ${ci} leaves road clearance at t=${elapsed}`);
+      check(seed, !edge.removed && !VIRTUAL.has(edge.cls) && clearance <= edge.width / 2 + 1e-7, `car ${ci} leaves road clearance at t=${elapsed}`);
     }
     if (routeHasTurn(g, car)) turns++;
   }
@@ -220,6 +237,21 @@ for (const [li, land] of LANDS.entries()) for (const life of ['off', 'low', 'hig
   else checkTraffic(seed, m);
   const cars = mm => JSON.stringify(mm.cars.map(c => [c.x, c.z, c.rot, c.path, c.nodes, c.t, c.speed]));
   check(seed, hashSeed(cars(m)) === hashSeed(cars(generateCity({ ...config }))), `non-deterministic ${life} traffic`);
+}
+
+// BSP remains a deliberately static fallback: it has no graph or corridor
+// metadata, but low/high life still emit the legacy {x,z,rot} car contract.
+for (const life of ['low', 'high']) {
+  const config = {
+    seed: `BSP-TRAFFIC-${life}`, engine: 'bsp', pattern: 'manhattan', land: 'flat',
+    density: 'med', rail: 'none', massing: 'mixed', sector: 'mixed', detail: 'med', life, air: 'sparse',
+  };
+  const m = generateCity(config), seed = `${config.seed}/${config.engine}`;
+  check(seed, !m.graph && !m.corridors && !m.stats, 'BSP unexpectedly exposes graph traffic metadata');
+  check(seed, m.cars.length > 0, `BSP life=${life} generated no legacy cars`);
+  for (const [ci, car] of m.cars.entries()) {
+    check(seed, !car.path && [car.x, car.z, car.rot].every(Number.isFinite), `BSP car ${ci} lost static placement contract`);
+  }
 }
 
 const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';
