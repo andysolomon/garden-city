@@ -63,7 +63,7 @@ function setStatus(t) { $('status').textContent = t; }
 function updateStats(m) {
   const s = m.stats;
   const graph = s
-    ? `<br>NODES ${s.nodes}<br>EDGES ${s.edges}<br>FACES ${s.faces}<br>LANDLOCKED ${s.landlocked}<br>OFFSET DROPS ${s.offsetDrops}`
+    ? `<br>NODES ${s.nodes}<br>EDGES ${s.edges}<br>FACES ${s.faces}<br>CORRIDORS ${s.corridors}<br>LANDLOCKED ${s.landlocked}<br>OFFSET DROPS ${s.offsetDrops}`
     : '';
   $('stats').innerHTML =
     `<b>CITY MODEL · ${m.engine.toUpperCase()}${m.pattern ? ' · ' + m.pattern.toUpperCase() : ''}</b>` +

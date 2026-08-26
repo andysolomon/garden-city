@@ -292,6 +292,23 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
       const N = g.nodes[n];
       if (pointSegDist(N.x, N.z, A.x, A.z, endX, endZ).d < S) return null;
     }
+    // Clearance: the interior of the segment must not run alongside a
+    // near-parallel edge closer than the parallel gap (a fraction of the
+    // block spacing) — two streets interleaving that closely make a sliver
+    // block, not a block. Crossing edges only need snapRadius.
+    const G = P.parallelGap;
+    for (const e of g.edgesNear(Math.min(A.x, endX) - G, Math.min(A.z, endZ) - G, Math.max(A.x, endX) + G, Math.max(A.z, endZ) + G)) {
+      const E = g.edges[e];
+      if (E.removed || E.a === from || E.b === from || e === splitAt || VIRTUAL.has(E.cls)) continue;
+      if (endNode !== null && (E.a === endNode || E.b === endNode)) continue;
+      const a = g.nodes[E.a], b = g.nodes[E.b];
+      const ea = Math.atan2(b.z - a.z, b.x - a.x);
+      const parallel = Math.min(angleBetween(ea, ang), angleBetween(ea + Math.PI, ang)) < .45;
+      const limit = parallel ? G : S;
+      for (const t of [.25, .5, .75]) {
+        if (pointSegDist(A.x + (endX - A.x) * t, A.z + (endZ - A.z) * t, a.x, a.z, b.x, b.z).d < limit) return null;
+      }
+    }
 
     // Commit.
     let node = endNode, created = false;
@@ -305,7 +322,9 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
     return { node, created, joined: splitAt };
   }
 
-  function successors(p, node, ang) {
+  // `through`: the street just crossed an existing road — continue forward
+  // but don't branch (the crossed road already provides the cross-streets).
+  function successors(p, node, ang, through = false) {
     const N = g.nodes[node];
     const pop = fields.population(N.x, N.z);
     const cls = p.cls;
@@ -315,6 +334,7 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
       Q.push({ t: p.t + 1, from: node, angle: ang, cls, free: p.free, len: p.free ? p.len : segLen(cls, ang, N.x, N.z, pop), depth: p.depth + 1, roadId: p.roadId });
     }
     for (const side of [-1, 1]) {
+      if (through) break;
       const prob = P.branch[cls] * (cls === 'arterial' ? 1 : (.6 + .4 * pop));
       if (!rng.bool(prob)) continue;
       let bcls = cls === 'arterial' ? (rng.bool(P.arterialSelfBranch) ? 'arterial' : 'collector')
@@ -360,10 +380,15 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
     }
     const r = commit(p.from, A.x + cx * len, A.z + sz * len, p.cls, { roadId: p.roadId });
     if (!r) { stats.rejected++; return; }
-    // A street that joined an existing node or edge stops there (T-junction);
-    // one that landed on the shore stops too. Otherwise it keeps growing.
-    if (!r.created || r.joined !== null) return;
-    successors(p, r.node, ang);
+    // A street that reaches the boundary or the shore ends there. One that
+    // crosses another road (split) or lands on an existing intersection
+    // continues straight through — that is what makes an avenue a corridor
+    // across the city instead of a chain of T-junctions.
+    if (r.joined !== null && VIRTUAL.has(g.edges[r.joined].cls)) return;
+    if (g.adj[r.node].some(e => VIRTUAL.has(g.edges[e].cls))) return;
+    const through = !r.created || r.joined !== null;
+    if (through && !P.through.includes(p.cls)) return; // locals still end at the first road they meet
+    successors(p, r.node, ang, through);
   }
 
   let guard = 0;

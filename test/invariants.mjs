@@ -19,7 +19,7 @@ const RAILS = ['none', 'metro', 'elevated', 'terminal'];
 const N = Number(process.argv[2] || 100);
 
 const failures = [];
-const totals = { faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 };
+const totals = { corridorLen: [], faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 };
 
 function check(seed, cond, msg) { if (!cond) failures.push(`${seed}: ${msg}`); }
 
@@ -123,6 +123,25 @@ for (let i = 0; i < N; i++) {
     }
   }
 
+  // 9. Corridors: every real edge belongs to exactly one corridor, and each
+  //    corridor is one connected chain (edge i shares a node with edge i+1).
+  {
+    const seen = new Map();
+    for (const c of m.corridors) {
+      check(seed, c.orphan === 0, `corridor ${c.id} has ${c.orphan} unchained edges`);
+      for (let i = 0; i < c.edgeIds.length; i++) {
+        const ei = c.edgeIds[i];
+        check(seed, !seen.has(ei), `edge ${ei} in two corridors`);
+        seen.set(ei, c.id);
+        if (i) {
+          const p = g.edges[c.edgeIds[i - 1]], q = g.edges[ei];
+          check(seed, [p.a, p.b].includes(q.a) || [p.a, p.b].includes(q.b), `corridor ${c.id} not a chain at edge ${i}`);
+        }
+      }
+    }
+    for (const e of live) if (!VIRTUAL.has(e.cls)) check(seed, seen.has(e.id), `edge ${e.id} in no corridor`);
+  }
+
   // 8. Determinism.
   {
     const ser = mm => JSON.stringify({
@@ -136,11 +155,15 @@ for (let i = 0; i < N; i++) {
   totals.faces += m.faces.length; totals.blocks += m.blocks.length; totals.offsetDrops += m.stats.offsetDrops;
   totals.parcels += m.parcels.length; totals.landlocked += m.stats.landlocked; totals.slivers += m.stats.slivers;
   totals.buildings += m.buildings.length;
+  const lens = m.corridors.filter(c => c.cls === 'arterial').map(c => c.length).sort((a, b) => a - b);
+  if (lens.length) totals.corridorLen.push(lens[lens.length >> 1]);
 }
 
 const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';
 console.log(`cities: ${N}  avg ${(totals.ms / N).toFixed(0)}ms`);
 console.log(`faces ${totals.faces}  blocks ${totals.blocks}  offset drops ${pct(totals.offsetDrops, totals.blocks)}  degenerate faces ${totals.degenerate}`);
+const cl = totals.corridorLen.sort((a, b) => a - b);
+console.log(`arterial corridor median length (median over cities): ${cl[cl.length >> 1].toFixed(0)}`);
 console.log(`parcels ${totals.parcels}  landlocked ${pct(totals.landlocked, totals.parcels)}  slivers dropped ${totals.slivers}  buildings ${totals.buildings}`);
 if (failures.length) {
   console.log(`\n${failures.length} FAILURES`);

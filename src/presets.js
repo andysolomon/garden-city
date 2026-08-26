@@ -21,6 +21,7 @@ const BASE = {
   maxDepth: { arterial: 80, collector: 14, local: 10 },
   delay: { arterial: 1, collector: 3, local: 7 },
   diagonals: 0,
+  through: ['arterial', 'collector'],      // classes that continue across a road they cross
   budgetScale: 1,
   parcelScale: 1,
   maxBlockArea: 200 * 200,
