@@ -17,6 +17,7 @@ Where things live:
 | Morphology presets (manhattan / paris / tokyo / medieval / atlanta) | `src/presets.js` |
 | Top-down debug map with layer toggles | `src/map.js` (MODE → MAP / DEBUG) |
 | Contact sheet (N seeds as thumbnails) | `contact.html` |
+| Corridor aggregation + street names | `src/corridors.js` |
 | Invariant harness, 100 seeds | `test/invariants.mjs` (`npm test`) |
 
 Deviations from the plan below, all deliberate:
@@ -32,6 +33,18 @@ Deviations from the plan below, all deliberate:
   together, which the parcel-inside-block invariant caught on seed T8.
 - Landlocked parcels become courtyards (rendered as quiet park fill) rather
   than being merged; the rate is ~5% across the harness.
+- Block offset is miter first, then a **stepped shrink** (`shrinkPolygon`)
+  when the miter self-intersects: the polygon is inset in small steps and
+  any edge that collapses is removed before the next step — a discretized
+  straight skeleton that handles edge events. Split events (a concave block
+  pinching in two) still drop; the residual rate is ~1%.
+- Arterials and collectors **continue straight through** a road they cross
+  or an intersection they land on (locals still end at the first road they
+  meet), and a segment whose interior runs within 0.4 × block spacing of a
+  near-parallel edge is rejected. Together these make avenues corridors
+  across the city instead of chains of T-junctions. Corridors are
+  aggregated by `roadId` in `src/corridors.js` and named deterministically;
+  the map's LABELS layer and the poster's [STREETS] panel show them.
 
 ---
 

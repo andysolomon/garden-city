@@ -143,6 +143,21 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
       ctx.fillText('f' + face.id, X(cx / b.length), Z(cz / b.length));
     }
   }
+  if (model.corridors && on('labels')) {
+    ctx.fillStyle = dark ? '#d8d4c8' : '#1c1a18';
+    ctx.font = `${Math.max(8, 3.6 * v.scale)}px Courier New`;
+    for (const c of model.corridors) {
+      if (c.cls === 'local' || c.length < 120) continue;
+      // Label along the longest edge of the corridor.
+      let best = null, bl = 0;
+      for (const ei of c.edgeIds) { const l = g.edgeLength(ei); if (l > bl) { bl = l; best = g.edges[ei]; } }
+      const a = g.nodes[best.a], b = g.nodes[best.b];
+      let ang = Math.atan2(b.z - a.z, b.x - a.x);
+      if (ang > Math.PI / 2 || ang < -Math.PI / 2) ang += Math.PI;
+      ctx.save(); ctx.translate(X((a.x + b.x) / 2), Z((a.z + b.z) / 2)); ctx.rotate(ang);
+      ctx.textAlign = 'center'; ctx.fillText(c.name, 0, -2); ctx.restore();
+    }
+  }
   if (model.centers) {
     ctx.strokeStyle = '#e8501e'; ctx.lineWidth = 1.5;
     for (const c of model.centers) { ctx.beginPath(); ctx.arc(X(c.x), Z(c.z), 6, 0, Math.PI * 2); ctx.stroke(); }

@@ -27,9 +27,9 @@ ES modules require an HTTP server (opening `index.html` via `file://` won't work
 ## Test
 
 ```sh
-npm test            # 100 seeds × 8 invariants: planarity, node spacing, simple
+npm test            # 100 seeds × 9 invariants: planarity, node spacing, simple
                     # faces, area conservation, parcels-in-block, frontage,
-                    # water/corridor clearance, determinism
+                    # water/corridor clearance, corridor chains, determinism
 ```
 
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
@@ -45,6 +45,7 @@ Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 - `src/graph.js` — planar road graph: growth loop, local constraints, face extraction
 - `src/blocks.js` — block offset, parcel subdivision, frontage, building fit
 - `src/fabric.js` — the graph fabric pipeline (fields → graph → blocks → buildings)
+- `src/corridors.js` — named street corridors aggregated from the graph
 - `src/presets.js` — morphology presets
 - `src/map.js` — top-down debug map renderer with layer toggles
 - `contact.html` — contact sheet of N seeds

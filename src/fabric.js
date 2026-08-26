@@ -11,6 +11,7 @@ import { makeWater, makePopulation, makeDirection, makeExclusion, makeNoise } fr
 import { growRoads, extractFaces, VIRTUAL } from './graph.js';
 import { buildableArea, subdivideParcels, findFrontage, fitRect } from './blocks.js';
 import { resolvePreset } from './presets.js';
+import { buildCorridors } from './corridors.js';
 import { centroid, obb, bbox, orientedRect, trimPolyAgainstRect, polyIntersectsRect, pointInPolygon, angleBetween } from './geom.js';
 
 export function graphFabric(model, land, rng, config) {
@@ -61,6 +62,7 @@ export function graphFabric(model, land, rng, config) {
 
   // ---- growth + faces ------------------------------------------------------
   const budget = Math.round(dcfg.budget * P.budgetScale);
+  P.parallelGap = Math.min(P.spacing.major, P.spacing.minor) * .4;
   const { graph: g, stats } = growRoads({ rng, fields, P, size, budget, centers: growthCenters });
   const fx = extractFaces(g);
   model.graph = g;
@@ -78,6 +80,8 @@ export function graphFabric(model, land, rng, config) {
     const entry = { polygon, cls: e.cls, type: e.cls === 'arterial' ? 'arterial' : 'street', width: e.width, a: [a.x, a.z], b: [b.x, b.z], angle, len, cx, cz, edge: i, bridge: e.bridge, ...bbox(polygon) };
     if (e.bridge) model.bridges.push(entry); else model.roads.push(entry);
   }
+  model.corridors = buildCorridors(g, config.seed);
+  model.stats.corridors = model.corridors.length;
   for (let n = 0; n < g.nodes.length; n++) {
     const inc = g.adj[n].filter(e => !g.edges[e].removed && !VIRTUAL.has(g.edges[e].cls));
     if (inc.length < 2) continue;

@@ -311,6 +311,56 @@ export function offsetPolygon(poly, dists, miterLimit = 3) {
   return clean;
 }
 
+// Inward offset that survives edge events: the polygon is shrunk in small
+// steps and any edge that collapses (length → 0 or direction flips) is
+// removed before the next step, which is exactly what a straight skeleton
+// does for edge events, discretized. Split events (a polygon pinching into
+// two) still fail the final simple-polygon check and return null.
+export function shrinkPolygon(poly, dists, step = 1.5) {
+  const n0 = poly.length;
+  if (n0 < 3) return null;
+  // Each edge: origin point on the (moving) line, unit direction, inward normal, remaining distance.
+  let E = [];
+  for (let i = 0; i < n0; i++) {
+    const p = poly[i], q = poly[(i + 1) % n0];
+    let dx = q[0] - p[0], dz = q[1] - p[1];
+    const l = Math.hypot(dx, dz);
+    if (l < EPS) continue;
+    dx /= l; dz /= l;
+    E.push({ px: p[0], pz: p[1], dx, dz, nx: -dz, nz: dx, rem: dists[i] });
+  }
+  const vertex = (a, b) => { // intersection of lines a and b (b follows a)
+    const den = a.dx * b.dz - a.dz * b.dx;
+    if (Math.abs(den) < 1e-9) return [b.px, b.pz];
+    const t = ((b.px - a.px) * b.dz - (b.pz - a.pz) * b.dx) / den;
+    return [a.px + a.dx * t, a.pz + a.dz * t];
+  };
+  let guard = 0;
+  while (E.length >= 3 && E.some(e => e.rem > 1e-9) && guard++ < 400) {
+    const s = Math.min(step, Math.max(...E.map(e => e.rem)));
+    for (const e of E) { const m = Math.min(s, e.rem); e.px += e.nx * m; e.pz += e.nz * m; e.rem -= m; }
+    // Remove collapsed edges, repeatedly (one collapse can trigger the next).
+    let changed = true;
+    while (changed && E.length >= 3) {
+      changed = false;
+      const n = E.length;
+      for (let i = 0; i < n; i++) {
+        const a = E[(i - 1 + n) % n], b = E[i], c = E[(i + 1) % n];
+        const v0 = vertex(a, b), v1 = vertex(b, c);
+        const ex = v1[0] - v0[0], ez = v1[1] - v0[1];
+        const len = Math.hypot(ex, ez);
+        if (len < 0.3 || ex * b.dx + ez * b.dz < 0) { E.splice(i, 1); changed = true; break; }
+      }
+    }
+  }
+  if (E.length < 3) return null;
+  const out = [];
+  for (let i = 0; i < E.length; i++) out.push(vertex(E[(i - 1 + E.length) % E.length], E[i]));
+  const clean = dedupe(out);
+  if (clean.length < 3 || signedArea(clean) <= 0 || !isSimple(clean)) return null;
+  return clean;
+}
+
 export function polyIntersectsRect(poly, r) {
   const b = bbox(poly);
   if (!(b.x < r.x + r.w && b.x + b.w > r.x && b.z < r.z + r.d && b.z + b.d > r.z)) return false;

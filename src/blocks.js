@@ -6,7 +6,7 @@
 // Parcels without frontage are landlocked and become courtyards.
 
 import {
-  area, obb, clipHalfPlaneMulti, offsetPolygon, pointSegDist, distToBoundary,
+  area, obb, clipHalfPlaneMulti, offsetPolygon, shrinkPolygon, pointSegDist, distToBoundary,
   pointInPolygon, orientedRect, centroid,
 } from './geom.js';
 
@@ -26,11 +26,14 @@ export function buildableArea(face, g, zone, detail) {
     const scale = detail === 'high' ? .85 : 1;
     return e.width / 2 + sb * scale;
   });
+  // Miter offset first (cheap, exact for the common convex block); when a
+  // short edge collapses under the inset the miter self-intersects, so fall
+  // back to the stepped shrink that handles edge events.
   let poly = offsetPolygon(face.polygon, dists);
+  if (!poly) poly = shrinkPolygon(face.polygon, dists);
   if (!poly) {
-    // Retry with a uniform, slightly smaller inset before giving up.
     const avg = dists.reduce((s, d) => s + d, 0) / dists.length * .85;
-    poly = offsetPolygon(face.polygon, dists.map(() => avg));
+    poly = shrinkPolygon(face.polygon, dists.map(() => avg));
   }
   return poly;
 }

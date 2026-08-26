@@ -101,7 +101,7 @@ export function exportPoster(viewer, model) {
   g.beginPath(); g.moveTo(60, fy); g.lineTo(W - 130, fy); g.stroke();
   g.setLineDash([]);
   g.font = 'bold 13px Courier New'; g.fillStyle = INK;
-  g.fillText('[KEY PLAN]', 62, fy + 30); g.fillText('[INDEX]', 380, fy + 30);
+  g.fillText('[KEY PLAN]', 62, fy + 30); if (model.corridors?.length) g.fillText('[STREETS]', 206, fy + 30); g.fillText('[INDEX]', 380, fy + 30);
   g.fillText('[SCALE]', 850, fy + 30); g.fillText('[CONFIGURATION]', 1180, fy + 30);
 
   // key plan
@@ -110,6 +110,15 @@ export function exportPoster(viewer, model) {
   g.save(); g.translate(127, fy + 110); g.rotate(r.next());
   g.fillRect(-22, -22, 44, 44); g.fillRect(14, 24, 14, 14);
   g.restore();
+
+  // street index: the longest named corridors (graph engine only)
+  if (model.corridors?.length) {
+    g.fillStyle = INK; g.font = '11px Courier New';
+    model.corridors.slice(0, 6).forEach((c, i) => {
+      g.fillText(`${c.name}`.toUpperCase().slice(0, 16), 206, fy + 58 + i * 18);
+      g.globalAlpha = .6; g.fillText(`${Math.round(c.length)}M`, 320, fy + 58 + i * 18); g.globalAlpha = 1;
+    });
+  }
 
   // index: real counts from the model
   g.fillStyle = INK; g.font = '11px Courier New';
