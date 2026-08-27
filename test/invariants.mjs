@@ -84,6 +84,36 @@ function checkTraffic(seed, m) {
   if (m.cars.length) check(seed, turns > 0, 'no routed car turns at an intersection');
 }
 
+// Focused sampler checks keep renderer time out of the model and exercise the
+// two route boundaries that broad generation invariants do not hit exactly.
+function checkRouteMotion() {
+  const graph = {
+    nodes: [{ x: 0, z: 0 }, { x: 10, z: 0 }, { x: 10, z: 10 }],
+    edges: [{ a: 0, b: 1, width: 8, bridge: false }, { a: 1, b: 2, width: 8, bridge: false }],
+    edgeLength(id) {
+      const e = this.edges[id], a = this.nodes[e.a], b = this.nodes[e.b];
+      return Math.hypot(b.x - a.x, b.z - a.z);
+    },
+  };
+  const car = { path: [0, 1], nodes: [0, 1, 2], routeLength: 20, t: 0, speed: 5 };
+  const before = JSON.stringify(car);
+  const p0 = positionOnRoute(graph, car, 0), p1 = positionOnRoute(graph, car, .5);
+  check('focused/route-motion', p1.x > p0.x, 'elapsed progress did not move the car');
+
+  const turnBefore = positionOnRoute(graph, car, 9.9 / car.speed);
+  const turnAfter = positionOnRoute(graph, car, 10.1 / car.speed);
+  check('focused/route-motion', Math.abs(turnBefore.rot - turnAfter.rot) > .5, 'turn heading did not change');
+
+  const end = positionOnRoute(graph, car, car.routeLength / car.speed);
+  const afterEnd = positionOnRoute(graph, car, car.routeLength / car.speed + .01);
+  check('focused/route-motion', Math.hypot(end.x - afterEnd.x, end.z - afterEnd.z) < .1, 'route-end reversal teleported');
+  const cycle = positionOnRoute(graph, car, car.routeLength * 2 / car.speed);
+  check('focused/route-motion', Math.hypot(cycle.x - p0.x, cycle.z - p0.z) < 1e-7 && Math.abs(cycle.rot - p0.rot) < 1e-7, 'route cycle did not loop');
+  check('focused/route-motion', JSON.stringify(car) === before, 'route sampling mutated the car');
+}
+
+checkRouteMotion();
+
 for (let i = 0; i < N; i++) {
   const config = {
     seed: `T${i}`, engine: 'graph',

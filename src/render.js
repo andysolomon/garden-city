@@ -46,10 +46,20 @@ export class Viewer {
 
     this.timer = new THREE.Timer();
     this.animation = null;
+    this.animationElapsed = 0;
+    this.animationLastTime = null;
     const loop = time => {
       requestAnimationFrame(loop);
       this.timer.update();
-      this.animation?.(time / 1000);
+      if (this.animation) {
+        const now = (Number.isFinite(time) ? time : performance.now()) / 1000;
+        if (this.animationLastTime === null) this.animationLastTime = now;
+        else {
+          this.animationElapsed += Math.max(0, now - this.animationLastTime);
+          this.animationLastTime = now;
+        }
+        this.animation(this.animationElapsed);
+      }
       this.controls.update(this.timer.getDelta());
       this.renderer.render(this.scene, this.camera);
     };
@@ -71,9 +81,9 @@ export class Viewer {
   // since installation, so rerendering restarts motion without mutating the
   // deterministic CityModel.
   setAnimation(update) {
-    if (!update) { this.animation = null; return; }
-    const start = performance.now() / 1000;
-    this.animation = now => update(Math.max(0, now - start));
+    this.animation = typeof update === 'function' ? update : null;
+    this.animationElapsed = 0;
+    this.animationLastTime = null;
   }
 
   setFrustum(aspect) {
