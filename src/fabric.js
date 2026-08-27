@@ -12,7 +12,11 @@ import { growRoads, extractFaces, VIRTUAL } from './graph.js';
 import { buildableArea, subdivideParcels, findFrontage, fitRect } from './blocks.js';
 import { resolvePreset } from './presets.js';
 import { buildCorridors } from './corridors.js';
-import { centroid, obb, bbox, orientedRect, trimPolyAgainstRect, polyIntersectsRect, pointInPolygon, angleBetween } from './geom.js';
+import {
+  centroid, obb, bbox, orientedRect, trimPolyAgainstRect, polyIntersectsRect,
+  pointInPolygon, angleBetween, offsetPolygon, shrinkPolygon, area, signedArea,
+  isSimple, distToBoundary, segIntersect,
+} from './geom.js';
 
 export function graphFabric(model, land, rng, config) {
   const dcfg = DENSITY[config.density];
@@ -135,6 +139,7 @@ export function graphFabric(model, land, rng, config) {
     if (b.landmark) { makePlaza(b); continue; }
     const parkChance = dcfg.park + (b.zone === 'civic' ? .08 : 0);
     if (rng.bool(parkChance)) { addPark(b); continue; }
+    if (config.massing === 'euro' && makePerimeter(b)) continue;
     parcelize(b);
   }
 
@@ -165,6 +170,60 @@ export function graphFabric(model, land, rng, config) {
     const poly = b.buildable;
     model.parks.push({ polygon: poly, ...bbox(poly) });
     scatterTrees(poly, Math.max(4, Math.floor(b.area / 2600)), rng, model, [.7, 1.35]);
+  }
+
+  // Euro blocks are a single polygonal building around a courtyard. Blocks
+  // crossed by reserved infrastructure, too small for a useful court, or
+  // rejected by the robust inset fall back to the ordinary parcel grammar.
+  function makePerimeter(b) {
+    const outer = b.buildable;
+    if (model.reserved.some(r => polyIntersectsRect(outer, r))) return false;
+    if (outer.some(([x, z]) => water.sdf(x, z) <= .5)) return false;
+
+    const box = obb(outer), minDim = Math.min(box.w, box.d);
+    if (minDim < 24 || area(outer) < 650) return false;
+    const depth = Math.min(rng.float(8, 13), minDim * .28);
+    const dists = outer.map(() => depth);
+    let courtyard = offsetPolygon(outer, dists);
+    if (!courtyard) courtyard = shrinkPolygon(outer, dists);
+    if (!validCourtyard(outer, courtyard)) return false;
+
+    const frontage = findFrontage(outer, outer, b.face, g);
+    if (!frontage) return false;
+    const parcel = {
+      polygon: outer, zone: b.zone, dist: b.dist, pop: b.pop, frontage,
+      landlocked: false, block: b, built: true, perimeter: true, ...bbox(outer),
+    };
+    model.parcels.push(parcel);
+
+    // Reuse the established euro height/style RNG grammar, then replace its
+    // fallback rectangle with the footprint's axis-aligned bounds. Rect-only
+    // consumers retain every legacy field while polygon renderers use rings.
+    const [mass] = massBuilding({ ...box, zone: b.zone, dist: b.dist }, config, dcfg, rng);
+    const bounds = bbox(outer);
+    Object.assign(mass, {
+      ...bounds, cx: bounds.x + bounds.w / 2, cz: bounds.z + bounds.d / 2,
+      angle: 0, style: 'perimeter', footprint: outer.map(p => p.slice()),
+      courtyard: courtyard.map(p => p.slice()), blockFace: b.face.id,
+    });
+    model.buildings.push(mass);
+    return true;
+  }
+
+  function validCourtyard(outer, inner) {
+    if (!inner || signedArea(inner) <= 0 || !isSimple(inner) || area(inner) < 36) return false;
+    if (area(inner) >= area(outer) - 1) return false;
+    for (let i = 0; i < inner.length; i++) {
+      const a = inner[i], q = inner[(i + 1) % inner.length];
+      for (const [x, z] of [a, [(a[0] + q[0]) / 2, (a[1] + q[1]) / 2]]) {
+        if (!pointInPolygon(x, z, outer) || distToBoundary(x, z, outer) <= .5) return false;
+      }
+      for (let j = 0; j < outer.length; j++) {
+        const p = outer[j], r = outer[(j + 1) % outer.length];
+        if (segIntersect(a[0], a[1], q[0], q[1], p[0], p[1], r[0], r[1])) return false;
+      }
+    }
+    return true;
   }
 
   function parcelize(b) {
