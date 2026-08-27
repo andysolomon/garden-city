@@ -116,14 +116,18 @@ export function positionOnRoute(graph, car, elapsed = 0) {
   const path = car.path || [];
   const nodes = car.nodes || [];
   const total = car.routeLength ?? routeLength(graph, path);
-  if (!path.length || nodes.length !== path.length + 1 || total <= 0) {
+  if (!path.length || nodes.length !== path.length + 1 || !Number.isFinite(total) || total <= 0) {
     return { x: car.x, z: car.z, rot: car.rot, bridge: !!car.bridge, edge: path[0] ?? -1 };
   }
+
   const cycle = total * 2;
-  let travel = ((car.t || 0) + elapsed * (car.speed || 0)) % cycle;
-  if (travel < 0) travel += cycle;
-  const forward = travel <= total;
-  if (!forward) travel = cycle - travel;
+  const t = Number.isFinite(car.t) ? car.t : 0;
+  const speed = Number.isFinite(car.speed) ? car.speed : 0;
+  const seconds = Number.isFinite(elapsed) ? elapsed : 0;
+  let phase = (t + seconds * speed) % cycle;
+  if (phase < 0) phase += cycle;
+  const forward = phase <= total;
+  const travel = forward ? phase : cycle - phase;
 
   let offset = 0, index = path.length - 1;
   for (let i = 0; i < path.length; i++) {
