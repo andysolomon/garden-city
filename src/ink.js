@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import { RNG } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
-import { flatPolygonsGeometry } from './render.js';
+import { flatPolygonsGeometry, polygonPrismGeometry } from './render.js';
 import { orientedRect } from './geom.js';
 import { positionOnRoute } from './routing.js';
 
@@ -77,6 +77,14 @@ class InkLines {
     for (let i = 0, n = pts.length; i < n; i++) {
       const a = pts[i], b = pts[(i + 1) % n];
       this.seg(a[0], y, a[1], b[0], y, b[1]);
+    }
+  }
+  prism(footprint, courtyard, y, h) {
+    const rings = courtyard ? [footprint, courtyard] : [footprint];
+    for (const ring of rings) {
+      this.poly(ring, y);
+      this.poly(ring, y + h + .18);
+      for (const [x, z] of ring) this.seg(x, y, z, x, y + h + .18, z);
     }
   }
   ring(cx, y, cz, r, n = 8, r2 = r) {
@@ -217,20 +225,30 @@ export function renderInk(viewer, model) {
   for (const p of model.plazas) faint.poly(p.polygon, gy + 1.7);
 
   // Buildings: paper occluder fills + ink edges; ~10% get an x-ray tint.
-  const paperSpecs = [], tinted = new Map();
+  const paperSpecs = [], tinted = new Map(), polygonFills = [];
   for (const b of model.buildings) {
-    main.obox(b.cx, b.y || 0, b.cz, b.w, b.h, b.d, b.angle || 0);
+    if (b.footprint) main.prism(b.footprint, b.courtyard, b.y || 0, b.h);
+    else main.obox(b.cx, b.y || 0, b.cz, b.w, b.h, b.d, b.angle || 0);
     if (b.h > 30 && rng.bool(.1)) {
       const c = rng.pick(TINTS);
-      if (!tinted.has(c)) tinted.set(c, []);
-      tinted.get(c).push(b);
+      if (b.footprint) polygonFills.push([b, fillMat(c, { transparent: true, opacity: night ? .3 : .2, depthWrite: false })]);
+      else {
+        if (!tinted.has(c)) tinted.set(c, []);
+        tinted.get(c).push(b);
+      }
     } else {
-      paperSpecs.push(b);
+      if (b.footprint) polygonFills.push([b, fillMat(T.paper)]);
+      else paperSpecs.push(b);
     }
   }
   if (paperSpecs.length) world.add(instancedBoxes(paperSpecs, fillMat(T.paper)));
   for (const [c, arr] of tinted) {
     world.add(instancedBoxes(arr, fillMat(c, { transparent: true, opacity: night ? .3 : .2, depthWrite: false })));
+  }
+  for (const [b, material] of polygonFills) {
+    const mesh = new THREE.Mesh(polygonPrismGeometry(b.footprint, b.courtyard, b.h), material);
+    mesh.position.y = b.y || 0;
+    world.add(mesh);
   }
 
   // Landmark: accent-tinted x-ray volume with accent-colored edges + spire line.

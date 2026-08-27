@@ -163,3 +163,17 @@ export function polygonMesh(polys, material, y = 0) {
   m.receiveShadow = true;
   return m;
 }
+
+// Polygon prism in world XZ, optionally with a courtyard hole. Shape-space Y
+// is negated before rotating so positive extrusion depth becomes world +Y.
+export function polygonPrismGeometry(footprint, courtyard, height) {
+  const ring = pts => pts.map(([x, z]) => new THREE.Vector2(x, -z));
+  const shape = new THREE.Shape(ring(footprint));
+  if (courtyard?.length >= 3) shape.holes.push(new THREE.Path(ring(courtyard)));
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: height, bevelEnabled: false, curveSegments: 1, steps: 1,
+  });
+  geo.rotateX(-Math.PI / 2);
+  geo.computeVertexNormals();
+  return geo;
+}

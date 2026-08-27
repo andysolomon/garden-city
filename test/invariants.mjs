@@ -12,6 +12,7 @@ import { VIRTUAL } from '../src/graph.js';
 import { TRAFFIC_SAMPLE_COUNT, buildDrivableAdjacency, lengthBudgetDijkstra, sampleTraffic, shortestPath, positionOnRoute } from '../src/routing.js';
 import {
   segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
+  polyIntersectsRect,
 } from '../src/geom.js';
 
 const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
@@ -24,6 +25,27 @@ const failures = [];
 const totals = { corridorLen: [], faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 };
 
 function check(seed, cond, msg) { if (!cond) failures.push(`${seed}: ${msg}`); }
+
+function checkFootprints(seed, m, requireCourtyard = false) {
+  const footprints = m.buildings.filter(b => b.footprint);
+  if (requireCourtyard) check(seed, footprints.length > 0, 'euro city has no perimeter courtyard building');
+  for (const [bi, b] of footprints.entries()) {
+    check(seed, b.style === 'perimeter', `footprint building ${bi} is not perimeter style`);
+    check(seed, Array.isArray(b.courtyard) && b.courtyard.length >= 3, `footprint building ${bi} has no courtyard ring`);
+    check(seed, signedArea(b.footprint) > 0 && isSimple(b.footprint), `footprint building ${bi} outer ring invalid`);
+    check(seed, signedArea(b.courtyard) > 0 && isSimple(b.courtyard), `footprint building ${bi} courtyard ring invalid`);
+    check(seed, area(b.courtyard) < area(b.footprint), `footprint building ${bi} courtyard is not smaller than outer ring`);
+    for (const [x, z] of b.courtyard) {
+      check(seed, pointInPolygon(x, z, b.footprint) && distToBoundary(x, z, b.footprint) > .5,
+        `footprint building ${bi} courtyard vertex outside outer ring`);
+    }
+    for (const key of ['cx', 'cz', 'w', 'd', 'h', 'y', 'angle', 'x', 'z']) {
+      check(seed, Number.isFinite(b[key]), `footprint building ${bi} lost rectangle field ${key}`);
+    }
+    check(seed, !m.reserved.some(r => polyIntersectsRect(b.footprint, r)), `footprint building ${bi} intersects reserved corridor`);
+  }
+  return footprints;
+}
 
 function routeHasTurn(g, car) {
   for (let i = 1; i < car.nodes.length - 1; i++) {
@@ -287,6 +309,26 @@ checkLengthBudgetTraversal();
   check('focused/T159', m.blocks.some(b => b.walkshed), 'T159 terminal walkshed marks no blocks');
 }
 
+// Representative perimeter-block matrix: density, street pattern, terrain,
+// and rail exclusions all exercise the polygon + courtyard path directly.
+for (const [seed, pattern, land, density, rail] of [
+  ['PERIMETER-FLAT', 'paris', 'flat', 'med', 'none'],
+  ['PERIMETER-RIVER', 'medieval', 'river', 'high', 'elevated'],
+  ['PERIMETER-ISLAND', 'tokyo', 'island', 'extreme', 'terminal'],
+  ['PERIMETER-COAST', 'atlanta', 'coast', 'low', 'metro'],
+]) {
+  const config = {
+    seed, engine: 'graph', pattern, land, density, rail, massing: 'euro',
+    sector: 'mixed', detail: 'med', life: 'off', air: 'sparse',
+  };
+  const m = generateCity(config), repeat = generateCity({ ...config });
+  checkFootprints(`focused/${seed}`, m, true);
+  const rings = city => JSON.stringify(city.buildings.map(b => [
+    b.cx, b.cz, b.w, b.d, b.h, b.angle, b.footprint, b.courtyard,
+  ]));
+  check(`focused/${seed}`, rings(m) === rings(repeat), 'non-deterministic perimeter serialization');
+}
+
 for (let i = 0; i < N; i++) {
   const config = {
     seed: `T${i}`, engine: 'graph',
@@ -379,9 +421,12 @@ for (let i = 0; i < N; i++) {
   // 6. Every built parcel has frontage.
   for (const p of m.parcels) if (p.built) check(seed, !!p.frontage, 'built parcel without frontage');
 
-  // 7. No building in water or inside a reserved corridor.
+  // 7. No building in water or inside a reserved corridor. Polygonal prism
+  //    buildings validate both rings; boxes retain their oriented corners.
+  checkFootprints(seed, m, config.massing === 'euro');
   for (const b of m.buildings) {
-    for (const [x, z] of orientedRect(b.cx, b.cz, b.w, b.d, b.angle)) {
+    const vertices = b.footprint ? b.footprint.concat(b.courtyard || []) : orientedRect(b.cx, b.cz, b.w, b.d, b.angle);
+    for (const [x, z] of vertices) {
       check(seed, m.fields.water.isLand(x, z), `building at ${x.toFixed(0)},${z.toFixed(0)} in water`);
       for (const r of m.reserved) check(seed, !(x > r.x + .5 && x < r.x + r.w - .5 && z > r.z + .5 && z < r.z + r.d - .5), `building corner inside reserved corridor`);
     }
@@ -415,7 +460,7 @@ for (let i = 0; i < N; i++) {
   {
     const ser = mm => JSON.stringify({
       n: mm.graph.nodes, e: mm.graph.edges.map(e => [e.a, e.b, e.cls, e.removed]),
-      b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle]),
+      b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle, b.footprint, b.courtyard]),
       w: mm.walkshed, wb: mm.blocks.map(b => b.walkshed),
       tv: trafficSignature(mm),
       c: mm.cars.map(c => [c.x, c.z, c.rot, c.path, c.nodes, c.routeLength, c.t, c.speed, c.originCorridor, c.originCorridorId, c.destinationCorridor, c.destinationCorridorId]),

@@ -15,7 +15,8 @@
 // Model contract (both engines emit the same shapes):
 //   roads/bridges: { polygon, type, width, a, b, angle, len, cx, cz, x,z,w,d }
 //   blocks/parks/plazas/parcels: { polygon, x,z,w,d, … }
-//   buildings: { cx, cz, w, d, h, y, angle, zone, style, x, z }
+//   buildings: { cx, cz, w, d, h, y, angle, zone, style, x, z,
+//                footprint?, courtyard? }
 //   landmarks: { x, z, w, d, h, angle }   (x,z = centre)
 
 import { RNG } from './rng.js';

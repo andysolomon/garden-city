@@ -4,7 +4,7 @@
 // junction caps, and buildings/landmarks are yawed by their `angle`.
 
 import * as THREE from 'three';
-import { mat, addBox, flatPolygonsGeometry } from './render.js';
+import { mat, addBox, flatPolygonsGeometry, polygonPrismGeometry } from './render.js';
 import { hashSeed } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
 import { orientedRect } from './geom.js';
@@ -106,6 +106,13 @@ export function renderSolid(viewer, model) {
   const groups = new Map();
   model.buildings.forEach((b, i) => {
     const color = pal.build[hashSeed(b.zone + b.style + i) % pal.build.length];
+    if (b.footprint) {
+      const mesh = new THREE.Mesh(polygonPrismGeometry(b.footprint, b.courtyard, b.h), mat(color, .78));
+      mesh.position.y = b.y || 0;
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      world.add(mesh);
+      return;
+    }
     if (!groups.has(color)) groups.set(color, []);
     groups.get(color).push(b);
   });
