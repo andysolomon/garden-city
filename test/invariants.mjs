@@ -9,7 +9,7 @@ import { generateCity, WALKSHED_BUDGET } from '../src/model.js';
 import { resolvePreset } from '../src/presets.js';
 import { hashSeed } from '../src/rng.js';
 import { VIRTUAL } from '../src/graph.js';
-import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute } from '../src/routing.js';
+import { TRAFFIC_SAMPLE_COUNT, buildDrivableAdjacency, lengthBudgetDijkstra, sampleTraffic, shortestPath, positionOnRoute } from '../src/routing.js';
 import {
   segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
 } from '../src/geom.js';
@@ -131,6 +131,63 @@ function checkWalkshed(seed, m, expected) {
   check(seed, marked > 0, 'walkshed marks no blocks');
 }
 
+function trafficSignature(m) {
+  const t = m.traffic;
+  if (!t) return null;
+  return JSON.stringify({
+    requested: t.requested, sampleCount: t.sampleCount, edgeCounts: t.edgeCounts,
+    corridorCounts: t.corridorCounts, routes: t.routes,
+  });
+}
+
+function checkTrafficVolume(seed, m) {
+  const t = m.traffic, g = m.graph;
+  check(seed, !!t && !!g, 'graph city lacks traffic analysis');
+  if (!t || !g) return;
+  check(seed, TRAFFIC_SAMPLE_COUNT === 128, 'traffic sample budget is not the approved 128 routes');
+  check(seed, t.requested === TRAFFIC_SAMPLE_COUNT, `traffic requested ${t.requested} samples`);
+  check(seed, t.sampleCount === TRAFFIC_SAMPLE_COUNT && t.samples === TRAFFIC_SAMPLE_COUNT
+    && t.routes.length === TRAFFIC_SAMPLE_COUNT, `traffic sampler did not return ${TRAFFIC_SAMPLE_COUNT} routes`);
+
+  const edgeCounts = Array.from({ length: g.edges.length }, () => 0);
+  const corridorCounts = Object.fromEntries(m.corridors.map(c => [String(c.id), 0]));
+  const edgeCorridor = new Map();
+  for (const c of m.corridors) {
+    check(seed, Number.isFinite(c.traffic), `corridor ${c.id} lacks numeric traffic annotation`);
+    for (const edgeId of c.edgeIds) edgeCorridor.set(edgeId, c.id);
+  }
+  for (const [ri, route] of t.routes.entries()) {
+    check(seed, route.originCorridorId !== route.destinationCorridorId
+      && route.originCorridor !== route.destinationCorridor, `sample ${ri} uses one corridor`);
+    check(seed, Array.isArray(route.edges) && Array.isArray(route.nodes)
+      && route.nodes.length === route.edges.length + 1, `sample ${ri} route shape is invalid`);
+    for (let i = 0; i < route.edges.length; i++) {
+      const edgeId = route.edges[i], edge = g.edges[edgeId];
+      check(seed, !!edge && !edge.removed && !VIRTUAL.has(edge.cls), `sample ${ri} uses non-live edge ${edgeId}`);
+      check(seed, edge && ((edge.a === route.nodes[i] && edge.b === route.nodes[i + 1])
+        || (edge.b === route.nodes[i] && edge.a === route.nodes[i + 1])), `sample ${ri} disconnects at ${i}`);
+      if (!edge) continue;
+      edgeCounts[edgeId]++;
+      const corridorId = edgeCorridor.get(edgeId);
+      if (corridorId !== undefined) corridorCounts[String(corridorId)]++;
+    }
+    const origin = m.corridors.find(c => c.id === route.originCorridorId && c.name === route.originCorridor);
+    const destination = m.corridors.find(c => c.id === route.destinationCorridorId && c.name === route.destinationCorridor);
+    check(seed, !!origin && origin.nodeIds.includes(route.nodes[0]), `sample ${ri} start is off origin corridor`);
+    check(seed, !!destination && destination.nodeIds.includes(route.nodes.at(-1)), `sample ${ri} end is off destination corridor`);
+  }
+
+  check(seed, JSON.stringify(t.edgeCounts) === JSON.stringify(edgeCounts), 'edge traffic counts disagree with sampled routes');
+  check(seed, JSON.stringify(t.corridorCounts) === JSON.stringify(corridorCounts), 'corridor traffic counts disagree with sampled routes');
+  for (let edgeId = 0; edgeId < g.edges.length; edgeId++) {
+    check(seed, Number.isFinite(g.edges[edgeId].traffic) && g.edges[edgeId].traffic === edgeCounts[edgeId], `graph edge ${edgeId} traffic mismatch`);
+  }
+  for (const entry of m.roads.concat(m.bridges)) {
+    check(seed, Number.isFinite(entry.traffic) && entry.traffic === edgeCounts[entry.edge], `road edge ${entry.edge} traffic mismatch`);
+  }
+  for (const c of m.corridors) check(seed, c.traffic === corridorCounts[String(c.id)], `corridor ${c.id} annotation mismatch`);
+}
+
 // Focused sampler checks keep renderer time out of the model and exercise the
 // two route boundaries that broad generation invariants do not hit exactly.
 function checkRouteMotion() {
@@ -182,6 +239,40 @@ function checkLengthBudgetTraversal() {
 }
 
 checkLengthBudgetTraversal();
+
+// Focused R5 volume checks: the graph analysis is present even when life is
+// off, is reproducible from the traffic stream, and remains bounded in cost.
+{
+  const config = {
+    seed: 'TRAFFIC-VOLUME', engine: 'graph', pattern: 'paris', land: 'river',
+    density: 'med', rail: 'none', massing: 'mixed', sector: 'mixed', detail: 'med',
+    life: 'off', air: 'none',
+  };
+  const timingRuns = 3;
+  const generationTimes = [], samplingTimes = [];
+  let m, repeat;
+  for (let run = 0; run < timingRuns; run++) {
+    const generationStart = performance.now();
+    const candidate = generateCity(config);
+    generationTimes.push(performance.now() - generationStart);
+    const samplingStart = performance.now();
+    const sampled = sampleTraffic(candidate.graph, candidate.corridors, config.seed);
+    samplingTimes.push(performance.now() - samplingStart);
+    if (!m) { m = candidate; repeat = sampled; }
+    check('focused/traffic-volume', trafficSignature(candidate) === trafficSignature(m), `generation run ${run} is not deterministic`);
+  }
+  checkTrafficVolume('focused/traffic-volume', m);
+  check('focused/traffic-volume', m.cars.length === 0, 'traffic volume analysis changed life=off');
+
+  check('focused/traffic-volume', trafficSignature(m) === JSON.stringify({
+    requested: repeat.requested, sampleCount: repeat.sampleCount, edgeCounts: repeat.edgeCounts,
+    corridorCounts: repeat.corridorCounts, routes: repeat.routes,
+  }), 'reusable traffic sampler is not deterministic');
+  const average = values => values.reduce((sum, value) => sum + value, 0) / values.length;
+  console.log(`traffic timing [medium-light; ${timingRuns} runs; ${TRAFFIC_SAMPLE_COUNT} routes]: `
+    + `standalone sampling avg/max=${average(samplingTimes).toFixed(2)}/${Math.max(...samplingTimes).toFixed(2)}ms; `
+    + `total generation avg/max=${average(generationTimes).toFixed(2)}/${Math.max(...generationTimes).toFixed(2)}ms`);
+}
 
 // Regression: the T159 terminal on an extreme Atlanta island must mark a
 // centroid-qualified block within the fixed physical-length budget.
@@ -326,6 +417,7 @@ for (let i = 0; i < N; i++) {
       n: mm.graph.nodes, e: mm.graph.edges.map(e => [e.a, e.b, e.cls, e.removed]),
       b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle]),
       w: mm.walkshed, wb: mm.blocks.map(b => b.walkshed),
+      tv: trafficSignature(mm),
       c: mm.cars.map(c => [c.x, c.z, c.rot, c.path, c.nodes, c.routeLength, c.t, c.speed, c.originCorridor, c.originCorridorId, c.destinationCorridor, c.destinationCorridorId]),
     });
     const h1 = hashSeed(ser(m)), h2 = hashSeed(ser(generateCity({ ...config })));
@@ -374,7 +466,7 @@ for (const life of ['low', 'high']) {
     density: 'med', rail: 'none', massing: 'mixed', sector: 'mixed', detail: 'med', life, air: 'sparse',
   };
   const m = generateCity(config), seed = `${config.seed}/${config.engine}`;
-  check(seed, !m.graph && !m.corridors && !m.stats, 'BSP unexpectedly exposes graph traffic metadata');
+  check(seed, !m.graph && !m.corridors && !m.stats && !m.traffic, 'BSP unexpectedly exposes graph traffic metadata');
   check(seed, m.cars.length > 0, `BSP life=${life} generated no legacy cars`);
   for (const [ci, car] of m.cars.entries()) {
     check(seed, !car.path && [car.x, car.z, car.rot].every(Number.isFinite), `BSP car ${ci} lost static placement contract`);

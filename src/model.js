@@ -22,9 +22,10 @@ import { RNG } from './rng.js';
 import { CITY_SIZE, DENSITY, intersects, pickZone, massBuilding } from './common.js';
 import { graphFabric } from './fabric.js';
 import { rectPoly, bbox, pointInPolygon } from './geom.js';
-import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute } from './routing.js';
+import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute, sampleTraffic } from './routing.js';
 
 export { CITY_SIZE } from './common.js';
+export { TRAFFIC_SAMPLE_COUNT } from './routing.js';
 export const WALKSHED_BUDGET = 300;
 
 export function generateCity(config) {
@@ -44,11 +45,30 @@ export function generateCity(config) {
   if (config.engine === 'bsp') bspFabric(model, land, rng, config);
   else graphFabric(model, land, rng, config);
 
+  annotateTraffic(model);
   annotateWalkshed(model);
   normalizeModel(model);
   addLife(config.life, model, rng);
   addAir(config.air, model, rng);
   return model;
+}
+
+// Traffic volume is graph analysis, not life simulation: graph cities always
+// expose the same bounded, seeded sample while BSP keeps its legacy plain-data
+// contract with no graph metadata.
+function annotateTraffic(model) {
+  const graph = model.graph;
+  if (!graph || !model.corridors) return;
+  const traffic = sampleTraffic(graph, model.corridors, model.seed);
+  model.traffic = traffic;
+
+  for (let edgeId = 0; edgeId < graph.edges.length; edgeId++) {
+    graph.edges[edgeId].traffic = traffic.edgeCounts[edgeId] || 0;
+  }
+  const annotate = entry => { entry.traffic = traffic.edgeCounts[entry.edge] || 0; };
+  model.roads.forEach(annotate);
+  model.bridges.forEach(annotate);
+  for (const corridor of model.corridors) corridor.traffic = traffic.corridorCounts[String(corridor.id)] || 0;
 }
 
 // A walkshed is model data, not renderer layout: resolve the terminal to the

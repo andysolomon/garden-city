@@ -2,9 +2,14 @@
 // deliberately plain-data: model generation can use it without importing
 // three.js, and both renderers can evaluate the same car at any elapsed time.
 
+import { RNG } from './rng.js';
 import { VIRTUAL } from './graph.js';
 
 export const ROUTE_SPEED = Object.freeze({ arterial: 1.45, collector: 1.12, local: .86 });
+export const TRAFFIC_SAMPLE_COUNT = 128;
+
+const TRAFFIC_ROUTE_ATTEMPTS = 12;
+const TRAFFIC_FALLBACK_ATTEMPTS = 256;
 
 class MinHeap {
   constructor() { this.items = []; this.seq = 0; }
@@ -148,6 +153,96 @@ export function shortestPath(graph, start, goal, adjacency = buildDrivableAdjace
   nodes.reverse(); edges.reverse();
   const length = edges.reduce((sum, edge) => sum + graph.edgeLength(edge), 0);
   return { nodes, edges, path: edges, length, cost: best[goal] };
+}
+
+// Sample a bounded set of routes for traffic-volume analysis. The sampler is
+// deliberately independent of car placement: callers provide a seed (or an
+// RNG) and get route records plus numeric edge/corridor traversal counts back.
+// A route always starts and ends on distinct named corridors and shortestPath
+// keeps every traversal on the live, non-virtual drivable graph.
+export function sampleTraffic(graph, corridors = [], seed = '', sampleCount = TRAFFIC_SAMPLE_COUNT) {
+  const edgeCounts = Array.from({ length: graph?.edges?.length || 0 }, () => 0);
+  const named = (Array.isArray(corridors) ? corridors : [])
+    .filter(c => c && c.name && c.edgeIds?.length && c.nodeIds?.length);
+  const requested = Number.isFinite(sampleCount)
+    ? Math.max(0, Math.min(TRAFFIC_SAMPLE_COUNT, Math.floor(sampleCount)))
+    : TRAFFIC_SAMPLE_COUNT;
+  const corridorCounts = Object.fromEntries(named.map(c => [String(c.id), 0]));
+  const edgeCorridor = new Map();
+  for (const c of named) for (const edgeId of c.edgeIds) edgeCorridor.set(edgeId, c.id);
+
+  const result = {
+    requested,
+    sampleCount: 0,
+    samples: 0,
+    routes: [],
+    edgeCounts,
+    corridorCounts,
+    corridors: named.map(c => ({ id: c.id, name: c.name, traffic: 0 })),
+  };
+  if (!graph?.nodes?.length || named.length < 2 || requested === 0) return result;
+
+  const rng = seed && typeof seed.pick === 'function' ? seed : new RNG(String(seed) + ':traffic');
+  const adjacency = buildDrivableAdjacency(graph);
+  const destinations = new Map(named.map(origin => [origin.id,
+    named.filter(destination => destination.id !== origin.id && destination.name !== origin.name)]));
+
+  const candidate = (origin, destination, start, goal) => {
+    if (!Number.isInteger(start) || !Number.isInteger(goal) || start === goal) return null;
+    const route = shortestPath(graph, start, goal, adjacency);
+    if (!route || !route.edges.length) return null;
+    if (route.edges.some(edgeId => {
+      const edge = graph.edges[edgeId];
+      return !Number.isInteger(edgeId) || !edge || edge.removed || VIRTUAL.has(edge.cls);
+    })) return null;
+    return { origin, destination, route };
+  };
+
+  // The normal graph is connected, so a random pair succeeds quickly. Keep a
+  // deterministic bounded fallback for small/custom graphs and avoid an
+  // unbounded retry loop if a caller supplies a disconnected graph.
+  let fallback = null;
+  const findFallback = () => {
+    if (fallback) return fallback;
+    let attempts = 0;
+    for (const origin of named) for (const destination of destinations.get(origin.id) || []) {
+      for (const start of origin.nodeIds) for (const goal of destination.nodeIds) {
+        if (attempts++ >= TRAFFIC_FALLBACK_ATTEMPTS) return fallback;
+        fallback = candidate(origin, destination, start, goal);
+        if (fallback) return fallback;
+      }
+    }
+    return fallback;
+  };
+
+  for (let i = 0; i < requested; i++) {
+    let selected = null;
+    for (let attempt = 0; attempt < TRAFFIC_ROUTE_ATTEMPTS && !selected; attempt++) {
+      const origin = rng.pick(named), options = destinations.get(origin.id) || [];
+      if (!options.length) continue;
+      const destination = rng.pick(options);
+      selected = candidate(origin, destination, rng.pick(origin.nodeIds), rng.pick(destination.nodeIds));
+    }
+    if (!selected) selected = findFallback();
+    if (!selected) break;
+
+    const { origin, destination, route } = selected;
+    for (const edgeId of route.edges) {
+      edgeCounts[edgeId]++;
+      const corridorId = edgeCorridor.get(edgeId);
+      if (corridorId !== undefined) corridorCounts[String(corridorId)]++;
+    }
+    result.routes.push({
+      originCorridor: origin.name, originCorridorId: origin.id,
+      destinationCorridor: destination.name, destinationCorridorId: destination.id,
+      nodes: route.nodes.slice(), edges: route.edges.slice(), path: route.edges.slice(),
+      length: route.length,
+    });
+  }
+
+  result.sampleCount = result.samples = result.routes.length;
+  for (const c of result.corridors) c.traffic = corridorCounts[String(c.id)] || 0;
+  return result;
 }
 
 // Evaluate a route distance. Cars ping-pong at their destinations, avoiding a

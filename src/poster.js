@@ -120,6 +120,19 @@ export function exportPoster(viewer, model) {
     });
   }
 
+  // Traffic index: show the busiest named corridors without changing the
+  // model's corridor ordering used by the rest of the poster.
+  if (model.traffic && model.corridors?.length) {
+    g.globalAlpha = 1; g.fillStyle = INK; g.font = 'bold 13px Courier New';
+    g.fillText('[TRAFFIC]', 206, fy + 190);
+    g.font = '11px Courier New';
+    model.corridors.slice().sort((a, b) => (b.traffic || 0) - (a.traffic || 0) || a.id - b.id).slice(0, 3).forEach((c, i) => {
+      const y = fy + 210 + i * 14;
+      g.fillText(`${c.name}`.toUpperCase().slice(0, 16), 206, y);
+      g.globalAlpha = .6; g.fillText(`${Math.round(c.traffic || 0)}X`, 320, y); g.globalAlpha = 1;
+    });
+  }
+
   // index: real counts from the model
   g.fillStyle = INK; g.font = '11px Courier New';
   const idx = [
