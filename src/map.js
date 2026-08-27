@@ -11,7 +11,7 @@ export const LAYERS = [
   ['faces', 'FACES', true], ['blocks', 'BUILDABLE', false], ['parcels', 'PARCELS', true],
   ['buildings', 'BUILDINGS', true], ['edges', 'EDGES', true], ['nodes', 'NODES', false],
   ['spurs', 'SPURS', true], ['labels', 'LABELS', false], ['reserved', 'RESERVED', true],
-  ['walkshed', 'WALKSHED', true],
+  ['walkshed', 'WALKSHED', true], ['traffic', 'TRAFFIC', false],
 ];
 
 const CLASS_COLORS = {
@@ -126,6 +126,23 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
       ctx.setLineDash([]);
     } else {
       for (const r of model.roads) { ctx.fillStyle = r.type === 'arterial' ? '#e8501e' : '#6b6b6b'; path(r.polygon); ctx.fill(); }
+    }
+  }
+  // Traffic volume is a renderer-only heat overlay: brighter and wider live
+  // edges carry more sampled routes, while the model's numeric annotations
+  // remain untouched.
+  if (g && on('traffic')) {
+    const live = g.edges.filter(e => !e.removed && !VIRTUAL.has(e.cls));
+    const max = Math.max(1, ...live.map(e => Number.isFinite(e.traffic) ? e.traffic : 0));
+    ctx.setLineDash([]);
+    for (let i = 0; i < g.edges.length; i++) {
+      const e = g.edges[i];
+      if (e.removed || VIRTUAL.has(e.cls)) continue;
+      const a = g.nodes[e.a], b = g.nodes[e.b];
+      const level = Math.sqrt(Math.max(0, (e.traffic || 0) / max));
+      ctx.strokeStyle = `rgba(232,80,30,${(.18 + level * .72).toFixed(3)})`;
+      ctx.lineWidth = Math.max(2, e.width * v.scale * (.45 + level * .55));
+      ctx.beginPath(); ctx.moveTo(X(a.x), Z(a.z)); ctx.lineTo(X(b.x), Z(b.z)); ctx.stroke();
     }
   }
   if (g && on('nodes')) {
