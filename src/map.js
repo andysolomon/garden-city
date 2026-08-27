@@ -11,6 +11,7 @@ export const LAYERS = [
   ['faces', 'FACES', true], ['blocks', 'BUILDABLE', false], ['parcels', 'PARCELS', true],
   ['buildings', 'BUILDINGS', true], ['edges', 'EDGES', true], ['nodes', 'NODES', false],
   ['spurs', 'SPURS', true], ['labels', 'LABELS', false], ['reserved', 'RESERVED', true],
+  ['walkshed', 'WALKSHED', true],
 ];
 
 const CLASS_COLORS = {
@@ -74,6 +75,10 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
       ctx.fillStyle = `hsla(${hue},45%,${dark ? 28 : 78}%,.55)`;
       path(face.polygon); ctx.fill();
     }
+  }
+  if (on('walkshed')) {
+    ctx.fillStyle = dark ? 'rgba(240,102,50,.2)' : 'rgba(232,80,30,.16)';
+    for (const b of model.blocks) if (b.walkshed) { path(b.polygon); ctx.fill(); }
   }
   if (on('blocks')) {
     ctx.strokeStyle = '#8aa07a'; ctx.lineWidth = 1;

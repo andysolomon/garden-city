@@ -5,11 +5,11 @@
 // and asserts fabric plus route-aware traffic invariants on each. Exits
 // non-zero on any failure.
 
-import { generateCity } from '../src/model.js';
+import { generateCity, WALKSHED_BUDGET } from '../src/model.js';
 import { resolvePreset } from '../src/presets.js';
 import { hashSeed } from '../src/rng.js';
 import { VIRTUAL } from '../src/graph.js';
-import { buildDrivableAdjacency, shortestPath, positionOnRoute } from '../src/routing.js';
+import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute } from '../src/routing.js';
 import {
   segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
 } from '../src/geom.js';
@@ -84,6 +84,53 @@ function checkTraffic(seed, m) {
   if (m.cars.length) check(seed, turns > 0, 'no routed car turns at an intersection');
 }
 
+function checkWalkshed(seed, m, expected) {
+  if (!expected) {
+    check(seed, !m.walkshed, 'unexpected walkshed metadata');
+    check(seed, !m.blocks.some(b => 'walkshed' in b), 'unexpected walkshed block annotation');
+    return;
+  }
+  const w = m.walkshed, g = m.graph;
+  check(seed, !!w && !!g, 'station graph city lacks walkshed metadata');
+  if (!w || !g) return;
+  check(seed, w.start === w.stationNode && w.budget === WALKSHED_BUDGET, 'walkshed origin or budget mismatch');
+  check(seed, w.nodeIds.length > 1 && w.edgeIds.length > 0, 'walkshed traversal is empty');
+  check(seed, w.distances.length === w.nodeIds.length, 'walkshed node/distance mismatch');
+  check(seed, w.nodeIds.every((id, i) => i === 0 || w.nodeIds[i - 1] < id), 'walkshed node IDs are not stable');
+  check(seed, w.edgeIds.every((id, i) => i === 0 || w.edgeIds[i - 1] < id), 'walkshed edge IDs are not stable');
+  const adjacency = buildDrivableAdjacency(g), nodeSet = new Set(w.nodeIds);
+  const station = m.rail.station, sx = station.x + station.w / 2, sz = station.z + station.d / 2;
+  let nearest = -1, nearestDistance = Infinity;
+  for (let node = 0; node < g.nodes.length; node++) {
+    if (!adjacency[node].length) continue;
+    const p = g.nodes[node], d = Math.hypot(p.x - sx, p.z - sz);
+    if (d < nearestDistance - 1e-12 || (Math.abs(d - nearestDistance) <= 1e-12 && node < nearest)) { nearest = node; nearestDistance = d; }
+  }
+  check(seed, w.stationNode === nearest && Math.abs(w.stationDistance - nearestDistance) < 1e-9, 'walkshed did not choose nearest live real node');
+  for (let i = 0; i < w.nodeIds.length; i++) check(seed, w.distances[i] >= 0 && w.distances[i] <= w.budget + 1e-9, `walkshed node ${w.nodeIds[i]} exceeds budget`);
+  for (const edgeId of w.edgeIds) {
+    const e = g.edges[edgeId];
+    check(seed, !!e && !e.removed && !VIRTUAL.has(e.cls), `walkshed contains non-drivable edge ${edgeId}`);
+    check(seed, e && nodeSet.has(e.a) && nodeSet.has(e.b), `walkshed edge ${edgeId} has unreachable endpoint`);
+  }
+  let marked = 0;
+  for (const block of m.blocks) {
+    let nearestBlock = -1, nearestBlockDistance = Infinity;
+    for (let node = 0; node < g.nodes.length; node++) {
+      if (!adjacency[node].length) continue;
+      const p = g.nodes[node], d = Math.hypot(p.x - block.cx, p.z - block.cz);
+      if (d < nearestBlockDistance - 1e-12 || (Math.abs(d - nearestBlockDistance) <= 1e-12 && node < nearestBlock)) {
+        nearestBlock = node;
+        nearestBlockDistance = d;
+      }
+    }
+    const qualifies = nearestBlock >= 0 && nodeSet.has(nearestBlock);
+    check(seed, block.walkshed === qualifies, 'walkshed block annotation does not match nearest live node to centroid');
+    if (block.walkshed) marked++;
+  }
+  check(seed, marked > 0, 'walkshed marks no blocks');
+}
+
 // Focused sampler checks keep renderer time out of the model and exercise the
 // two route boundaries that broad generation invariants do not hit exactly.
 function checkRouteMotion() {
@@ -113,6 +160,41 @@ function checkRouteMotion() {
 }
 
 checkRouteMotion();
+
+// Physical-length traversal is independent of road class speed and excludes
+// both removed and virtual edges. Results remain numerically ordered.
+function checkLengthBudgetTraversal() {
+  const graph = {
+    nodes: [{ x: 0, z: 0 }, { x: 5, z: 0 }, { x: 10, z: 0 }, { x: 0, z: 9 }, { x: 0, z: 1 }],
+    edges: [
+      { a: 0, b: 1, cls: 'arterial', removed: false },
+      { a: 1, b: 2, cls: 'local', removed: false },
+      { a: 0, b: 3, cls: 'collector', removed: false },
+      { a: 2, b: 3, cls: 'local', removed: true },
+      { a: 0, b: 4, cls: 'boundary', removed: false },
+    ],
+  };
+  const first = lengthBudgetDijkstra(graph, 0, 10), second = lengthBudgetDijkstra(graph, 0, 10);
+  check('focused/walkshed-traversal', JSON.stringify(first) === JSON.stringify(second), 'length-budget traversal is non-deterministic');
+  check('focused/walkshed-traversal', JSON.stringify(first?.nodeIds) === '[0,1,2,3]', 'length-budget traversal reached wrong nodes');
+  check('focused/walkshed-traversal', JSON.stringify(first?.edgeIds) === '[0,1,2]', 'length-budget traversal included wrong edges');
+  check('focused/walkshed-traversal', JSON.stringify(first?.distances) === '[0,5,10,9]', 'length-budget traversal returned wrong distances');
+}
+
+checkLengthBudgetTraversal();
+
+// Regression: the T159 terminal on an extreme Atlanta island must mark a
+// centroid-qualified block within the fixed physical-length budget.
+{
+  const config = {
+    seed: 'T159', engine: 'graph', pattern: 'atlanta', land: 'island',
+    density: 'extreme', rail: 'terminal', massing: 'industrial', sector: 'mixed',
+    detail: 'med', life: 'low', air: 'sparse',
+  };
+  const m = generateCity(config);
+  checkWalkshed('focused/T159', m, true);
+  check('focused/T159', m.blocks.some(b => b.walkshed), 'T159 terminal walkshed marks no blocks');
+}
 
 for (let i = 0; i < N; i++) {
   const config = {
@@ -236,12 +318,14 @@ for (let i = 0; i < N; i++) {
   // 10-12. Routed traffic uses only live real edges, stays within road
   // clearance while moving, and includes an intersection turn.
   checkTraffic(seed, m);
+  checkWalkshed(seed, m, config.rail === 'terminal');
 
   // 8 + 13. City and traffic determinism.
   {
     const ser = mm => JSON.stringify({
       n: mm.graph.nodes, e: mm.graph.edges.map(e => [e.a, e.b, e.cls, e.removed]),
       b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle]),
+      w: mm.walkshed, wb: mm.blocks.map(b => b.walkshed),
       c: mm.cars.map(c => [c.x, c.z, c.rot, c.path, c.nodes, c.routeLength, c.t, c.speed, c.originCorridor, c.originCorridorId, c.destinationCorridor, c.destinationCorridorId]),
     });
     const h1 = hashSeed(ser(m)), h2 = hashSeed(ser(generateCity({ ...config })));
@@ -253,6 +337,19 @@ for (let i = 0; i < N; i++) {
   totals.buildings += m.buildings.length;
   const lens = m.corridors.filter(c => c.cls === 'arterial').map(c => c.length).sort((a, b) => a - b);
   if (lens.length) totals.corridorLen.push(lens[lens.length >> 1]);
+}
+
+// Focused rail matrix: only graph terminals have stations and therefore a
+// walkshed; other rail variants preserve their existing no-station contract.
+for (const rail of RAILS) {
+  const config = {
+    seed: `WALKSHED-${rail}`, engine: 'graph', pattern: 'manhattan', land: 'flat',
+    density: 'med', rail, massing: 'mixed', sector: 'mixed', detail: 'med', life: 'off', air: 'sparse',
+  };
+  const m = generateCity(config), repeat = generateCity({ ...config });
+  checkWalkshed(`focused/${rail}`, m, rail === 'terminal');
+  check(`focused/${rail}`, JSON.stringify(m.walkshed) === JSON.stringify(repeat.walkshed)
+    && JSON.stringify(m.blocks.map(b => b.walkshed)) === JSON.stringify(repeat.blocks.map(b => b.walkshed)), 'non-deterministic walkshed annotations');
 }
 
 // Focused life/land matrix: off remains empty, while low/high traffic routes
@@ -282,6 +379,14 @@ for (const life of ['low', 'high']) {
   for (const [ci, car] of m.cars.entries()) {
     check(seed, !car.path && [car.x, car.z, car.rot].every(Number.isFinite), `BSP car ${ci} lost static placement contract`);
   }
+}
+
+{
+  const config = {
+    seed: 'BSP-WALKSHED', engine: 'bsp', pattern: 'manhattan', land: 'flat',
+    density: 'med', rail: 'terminal', massing: 'mixed', sector: 'mixed', detail: 'med', life: 'off', air: 'sparse',
+  };
+  checkWalkshed('focused/bsp-terminal', generateCity(config), false);
 }
 
 const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';

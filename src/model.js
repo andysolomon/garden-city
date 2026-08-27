@@ -22,9 +22,10 @@ import { RNG } from './rng.js';
 import { CITY_SIZE, DENSITY, intersects, pickZone, massBuilding } from './common.js';
 import { graphFabric } from './fabric.js';
 import { rectPoly, bbox, pointInPolygon } from './geom.js';
-import { buildDrivableAdjacency, shortestPath, positionOnRoute } from './routing.js';
+import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute } from './routing.js';
 
 export { CITY_SIZE } from './common.js';
+export const WALKSHED_BUDGET = 300;
 
 export function generateCity(config) {
   config = { engine: 'graph', pattern: 'manhattan', ...config };
@@ -43,10 +44,49 @@ export function generateCity(config) {
   if (config.engine === 'bsp') bspFabric(model, land, rng, config);
   else graphFabric(model, land, rng, config);
 
+  annotateWalkshed(model);
   normalizeModel(model);
   addLife(config.life, model, rng);
   addAir(config.air, model, rng);
   return model;
+}
+
+// A walkshed is model data, not renderer layout: resolve the terminal to the
+// nearest node that participates in the live real road graph, traverse a fixed
+// physical-length budget, then annotate each graph block by the nearest live
+// road node to its centroid. Rail kinds without a station and BSP intentionally
+// have none.
+function annotateWalkshed(model) {
+  const station = model.rail?.station, graph = model.graph;
+  if (!station || !graph) return;
+  const adjacency = buildDrivableAdjacency(graph);
+  const sx = station.x + station.w / 2, sz = station.z + station.d / 2;
+  let stationNode = -1, nearest = Infinity;
+  for (let node = 0; node < graph.nodes.length; node++) {
+    if (!adjacency[node].length) continue;
+    const p = graph.nodes[node], distance = Math.hypot(p.x - sx, p.z - sz);
+    if (distance < nearest - 1e-12 || (Math.abs(distance - nearest) <= 1e-12 && node < stationNode)) {
+      stationNode = node;
+      nearest = distance;
+    }
+  }
+  if (stationNode < 0) return;
+  const reached = lengthBudgetDijkstra(graph, stationNode, WALKSHED_BUDGET, adjacency);
+  if (!reached) return;
+  const nodeIds = new Set(reached.nodeIds);
+  for (const block of model.blocks) {
+    let blockNode = -1, blockDistance = Infinity;
+    for (let node = 0; node < graph.nodes.length; node++) {
+      if (!adjacency[node].length) continue;
+      const p = graph.nodes[node], distance = Math.hypot(p.x - block.cx, p.z - block.cz);
+      if (distance < blockDistance - 1e-12 || (Math.abs(distance - blockDistance) <= 1e-12 && node < blockNode)) {
+        blockNode = node;
+        blockDistance = distance;
+      }
+    }
+    block.walkshed = blockNode >= 0 && nodeIds.has(blockNode);
+  }
+  model.walkshed = { ...reached, stationNode, stationDistance: nearest };
 }
 
 // ---------------------------------------------------------------------------

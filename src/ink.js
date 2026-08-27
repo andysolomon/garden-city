@@ -178,6 +178,11 @@ export function renderInk(viewer, model) {
     }
   }
 
+  // A quiet station-catchment wash, using model annotations only. Roads and
+  // buildings remain above it, preserving the drafting hierarchy.
+  polygonFill(world, model.blocks.filter(b => b.walkshed).map(b => b.polygon),
+    fillMat(T.accent, { transparent: true, opacity: night ? .08 : .055, depthWrite: false }), gy + .7);
+
   // Roads: quiet ribbon fills + round junction caps; arterials get an outline
   // along their two kerbs.
   const roadPolys = model.roads.map(r => r.polygon).concat(model.roadCaps.filter(c => !c.elevated).map(c => c.polygon));
