@@ -60,6 +60,46 @@ export function buildDrivableAdjacency(graph, speeds = ROUTE_SPEED) {
   return adjacency;
 }
 
+// Length-limited Dijkstra for pedestrian catchments. Unlike car routing this
+// uses physical edge length, not class speed. IDs are returned in numeric
+// order and distances correspond one-for-one with nodeIds, making the result
+// stable even when equal-distance heap entries are encountered in a different
+// insertion order.
+export function lengthBudgetDijkstra(graph, start, budget, adjacency = buildDrivableAdjacency(graph)) {
+  if (!Number.isInteger(start) || !graph.nodes[start] || !Number.isFinite(budget) || budget < 0) return null;
+
+  const best = new Float64Array(graph.nodes.length); best.fill(Infinity);
+  const closed = new Uint8Array(graph.nodes.length);
+  const reachableEdges = new Set();
+  const open = new MinHeap();
+  best[start] = 0;
+  open.push({ node: start, g: 0, f: 0 });
+
+  while (open.size) {
+    const cur = open.pop();
+    if (closed[cur.node] || cur.g !== best[cur.node]) continue;
+    closed[cur.node] = 1;
+    for (const step of adjacency[cur.node] || []) {
+      const edge = graph.edges[step.edge];
+      if (!edge || edge.removed || VIRTUAL.has(edge.cls)) continue;
+      const next = cur.g + step.length;
+      if (next > budget + 1e-12) continue;
+      reachableEdges.add(step.edge);
+      if (next >= best[step.node] - 1e-12) continue;
+      best[step.node] = next;
+      open.push({ node: step.node, g: next, f: next });
+    }
+  }
+
+  const nodeIds = [];
+  for (let node = 0; node < best.length; node++) if (Number.isFinite(best[node])) nodeIds.push(node);
+  return {
+    start, budget, nodeIds,
+    edgeIds: [...reachableEdges].sort((a, b) => a - b),
+    distances: nodeIds.map(node => best[node]),
+  };
+}
+
 // A* with a fastest-road-scaled Euclidean heuristic. The result retains both
 // edge and node order so route validity and per-frame geometry are explicit.
 export function shortestPath(graph, start, goal, adjacency = buildDrivableAdjacency(graph), speeds = ROUTE_SPEED) {
