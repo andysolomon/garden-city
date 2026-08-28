@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import { RNG } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
-import { flatPolygonsGeometry, polygonPrismGeometry } from './render.js';
+import { flatPolygonsGeometry, polygonPrismsGeometry } from './render.js';
 import { orientedRect } from './geom.js';
 import { positionOnRoute } from './routing.js';
 
@@ -31,7 +31,7 @@ export function themeFor(config) {
 
 const TINTS = [0xe8724a, 0x8aa07a, 0xc8a060, 0xb05540];
 
-class InkLines {
+export class InkLines {
   constructor(rng, jitter) { this.pos = []; this.rng = rng; this.j = jitter; }
   r(scale) { return (this.rng.next() - .5) * scale * 2; }
   seg(ax, ay, az, bx, by, bz) {
@@ -79,8 +79,15 @@ class InkLines {
       this.seg(a[0], y, a[1], b[0], y, b[1]);
     }
   }
+  // Supports the issue's prism(footprint, y, h) API and the courtyard-aware
+  // form used by the model: prism(footprint, courtyard, y, h).
   prism(footprint, courtyard, y, h) {
-    const rings = courtyard ? [footprint, courtyard] : [footprint];
+    if (typeof courtyard === 'number') {
+      h = y;
+      y = courtyard;
+      courtyard = null;
+    }
+    const rings = courtyard?.length >= 3 ? [footprint, courtyard] : [footprint];
     for (const ring of rings) {
       this.poly(ring, y);
       this.poly(ring, y + h + .18);
@@ -225,19 +232,22 @@ export function renderInk(viewer, model) {
   for (const p of model.plazas) faint.poly(p.polygon, gy + 1.7);
 
   // Buildings: paper occluder fills + ink edges; ~10% get an x-ray tint.
-  const paperSpecs = [], tinted = new Map(), polygonFills = [];
+  const paperSpecs = [], tinted = new Map(), paperPrisms = [], tintedPrisms = new Map();
   for (const b of model.buildings) {
     if (b.footprint) main.prism(b.footprint, b.courtyard, b.y || 0, b.h);
     else main.obox(b.cx, b.y || 0, b.cz, b.w, b.h, b.d, b.angle || 0);
     if (b.h > 30 && rng.bool(.1)) {
       const c = rng.pick(TINTS);
-      if (b.footprint) polygonFills.push([b, fillMat(c, { transparent: true, opacity: night ? .3 : .2, depthWrite: false })]);
+      if (b.footprint) {
+        if (!tintedPrisms.has(c)) tintedPrisms.set(c, []);
+        tintedPrisms.get(c).push(b);
+      }
       else {
         if (!tinted.has(c)) tinted.set(c, []);
         tinted.get(c).push(b);
       }
     } else {
-      if (b.footprint) polygonFills.push([b, fillMat(T.paper)]);
+      if (b.footprint) paperPrisms.push(b);
       else paperSpecs.push(b);
     }
   }
@@ -245,9 +255,15 @@ export function renderInk(viewer, model) {
   for (const [c, arr] of tinted) {
     world.add(instancedBoxes(arr, fillMat(c, { transparent: true, opacity: night ? .3 : .2, depthWrite: false })));
   }
-  for (const [b, material] of polygonFills) {
-    const mesh = new THREE.Mesh(polygonPrismGeometry(b.footprint, b.courtyard, b.h), material);
-    mesh.position.y = b.y || 0;
+  if (paperPrisms.length) {
+    const mesh = new THREE.Mesh(polygonPrismsGeometry(paperPrisms), fillMat(T.paper));
+    mesh.userData.inkFootprintFillCount = paperPrisms.length;
+    world.add(mesh);
+  }
+  for (const [c, arr] of tintedPrisms) {
+    const mesh = new THREE.Mesh(polygonPrismsGeometry(arr),
+      fillMat(c, { transparent: true, opacity: night ? .3 : .2, depthWrite: false }));
+    mesh.userData.inkFootprintFillCount = arr.length;
     world.add(mesh);
   }
 

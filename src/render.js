@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export class Viewer {
   constructor(viewport) {
@@ -176,4 +177,19 @@ export function polygonPrismGeometry(footprint, courtyard, height) {
   geo.rotateX(-Math.PI / 2);
   geo.computeVertexNormals();
   return geo;
+}
+
+// Merge arbitrarily shaped building prisms into one geometry/material bucket.
+// Baking each building's elevation into its vertices keeps ink fill draw calls
+// bounded by palette size instead of perimeter-building count.
+export function polygonPrismsGeometry(specs) {
+  const geometries = specs.map(spec => {
+    const geo = polygonPrismGeometry(spec.footprint, spec.courtyard, spec.h);
+    geo.translate(0, spec.y || 0, 0);
+    return geo;
+  });
+  if (geometries.length === 1) return geometries[0];
+  const merged = mergeGeometries(geometries, false);
+  geometries.forEach(geo => geo.dispose());
+  return merged;
 }
