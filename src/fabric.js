@@ -59,7 +59,9 @@ export function graphFabric(model, land, rng, config) {
 
   const population = makePopulation(centers, size);
   const noise = makeNoise(config.seed + ':noise');
-  const direction = makeDirection(P.sources(rng, growthCenters), noise, { noiseAmp: P.noiseAmp, noiseScale: P.noiseScale });
+  const direction = makeDirection(P.sources(rng, growthCenters), noise, {
+    noiseAmp: P.noiseAmp, noiseScale: P.noiseScale, shores: water.shores,
+  });
   const fields = { water, population, direction, exclusion, elevation: () => 0 };
   model.fields = fields;
   model.centers = centers;

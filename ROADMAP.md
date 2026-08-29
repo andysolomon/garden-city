@@ -222,6 +222,10 @@ work to enable it is already done.
   optimal.
 - Cars get `{ path: [edgeIds], t, speed }` instead of a fixed point. Emit their
   current `{x, z, rot}` per frame, or precompute a polyline the renderer walks.
+- Lane placement is a follow-up: give routed cars a deterministic side-of-road
+  offset (right-hand traffic on roads wide enough for lanes), with narrow roads
+  gracefully falling back to the centerline. The offset must remain within the
+  road clearance and survive turns without a teleport.
 - Renderers already orient cars by `rot` — `renderCars()` in `solid.js` and the
   `faint.obox()` call in `ink.js`. Minimal renderer change.
 - Use `model.corridors` for origin/destination selection: routing between two
@@ -305,6 +309,7 @@ Small, well-characterized, none urgent.
 |---|---|---|
 | Offset drops | 1.1% of blocks | Was 10.3%. What remains are **split events** — a concave block pinching into two pieces mid-offset. `shrinkPolygon` handles edge events only. A full straight skeleton would fix it; probably not worth it at 1.1%. |
 | Landlocked parcels | 4.7% | Become courtyards (quiet park fill). The design doc's preferred handling was **merge into a neighbour**; running an alley to them (adding graph edges) is the other option. |
+| Lane-aware traffic | Routed cars currently follow edge centerlines | Add deterministic side-of-road offsets for wide roads, with a centerline fallback on narrow streets; keep positions inside road clearance through turns. |
 | Sliver parcels dropped | ~2,400 per 100 cities | Filtered by area and min dimension in `subdivideParcels`. Expected, not a fault. |
 | Corridor names | German-flavoured stems in `corridors.js` | No language/theme switch. Trivial to add, would pair with the poster's massing themes. |
 | BSP engine | Untested by harness | Deliberate — it is legacy. If it starts mattering again, parameterize the harness over `engine`. |
