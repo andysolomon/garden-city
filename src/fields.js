@@ -101,33 +101,120 @@ export function makePopulation(centers, size) {
 }
 
 // ---------------------------------------------------------------------------
-// Direction: blended *angle* field (shippable first cut of the tensor field).
-// Each source contributes a line direction with a radial-basis weight; the
-// blend happens on doubled angles so that θ and θ+π agree, and the result is
-// perturbed by value noise for organic fabric. Returns the major angle in
-// [0, π); the minor is major + π/2.
+// Direction: a blended symmetric-traceless tensor field. A line direction θ
+// is represented by [[cos(2θ), sin(2θ)], [sin(2θ), -cos(2θ)]], so opposite
+// headings describe the same basis. The major eigenvector is returned as an
+// angle in [0, π); the minor is major + π/2.
 //
 // sources: [{ type: 'grid', angle, x, z, sigma, weight }
 //           { type: 'radial', x, z, sigma, weight }]
-// sigma = Infinity gives a global source.
+// sigma = Infinity gives a global source. opts.shores accepts the shoreline
+// array returned by makeWater(); each valid segment contributes its tangent
+// basis using point-to-segment distance.
 // ---------------------------------------------------------------------------
-export function makeDirection(sources, noise, opts = {}) {
-  const amp = opts.noiseAmp || 0, scale = opts.noiseScale || 1 / 150;
-  return (x, z) => {
-    let cx = 0, cz = 0;
-    for (const s of sources) {
-      const dx = x - s.x, dz = z - s.z;
-      const d2 = dx * dx + dz * dz;
-      const w = s.weight * (isFinite(s.sigma) ? Math.exp(-d2 / (2 * s.sigma * s.sigma)) : 1);
-      if (w < 1e-6) continue;
-      const a = s.type === 'radial' ? Math.atan2(dz, dx) : s.angle;
-      cx += Math.cos(2 * a) * w; cz += Math.sin(2 * a) * w;
+function finiteOr(value, fallback) { return Number.isFinite(value) ? value : fallback; }
+
+function sigmaOr(value, fallback) {
+  if (value === Infinity || value === -Infinity) return Infinity;
+  return Number.isFinite(value) ? Math.abs(value) : fallback;
+}
+
+function sourceWeight(source, d2) {
+  const weight = source.weight === undefined ? 1 : finiteOr(source.weight, 0);
+  if (!weight) return 0;
+  const rawSigma = source.sigma;
+  const sigma = rawSigma === undefined || rawSigma === null ? Infinity : sigmaOr(rawSigma, Infinity);
+  return weight * rbfWeight(d2, sigma);
+}
+
+function rbfWeight(d2, sigma) {
+  if (!Number.isFinite(d2) || d2 < 0) return 0;
+  if (sigma === Infinity) return 1;
+  if (d2 === 0) return 1;
+  if (sigma <= 0) return d2 === 0 ? 1 : 0;
+  return Math.exp(-d2 / (sigma * sigma));
+}
+
+function shorePoint(point, index, name) {
+  if (Array.isArray(point)) return finiteOr(point[index], null);
+  if (point && typeof point === 'object') return finiteOr(point[name], null);
+  return null;
+}
+
+function boundaryBases(data, defaultSigma, defaultWeight) {
+  const shores = Array.isArray(data) ? data : data?.shores;
+  if (!Array.isArray(shores)) return [];
+  const bases = [];
+  for (const shore of shores) {
+    const points = Array.isArray(shore) ? shore : shore?.pts;
+    if (!Array.isArray(points) || points.length < 2) continue;
+    const closed = !Array.isArray(shore) && shore?.closed === true;
+    const weight = shore?.weight === undefined ? defaultWeight : finiteOr(shore.weight, 0);
+    const sigma = shore?.sigma === undefined ? defaultSigma : sigmaOr(shore.sigma, defaultSigma);
+    const count = closed ? points.length : points.length - 1;
+    for (let i = 0; i < count; i++) {
+      const a = points[i], b = points[(i + 1) % points.length];
+      const ax = shorePoint(a, 0, 'x'), az = shorePoint(a, 1, 'z');
+      const bx = shorePoint(b, 0, 'x'), bz = shorePoint(b, 1, 'z');
+      if (![ax, az, bx, bz].every(Number.isFinite)) continue;
+      if (ax === bx && az === bz) continue;
+      bases.push({ ax, az, bx, bz, angle: Math.atan2(bz - az, bx - ax), weight, sigma });
     }
-    let a = (cx === 0 && cz === 0) ? 0 : Math.atan2(cz, cx) / 2;
-    if (amp) a += noise(x * scale + 17.3, z * scale - 4.1) * amp;
-    a %= Math.PI;
-    if (a < 0) a += Math.PI;
-    return a;
+  }
+  return bases;
+}
+
+function optionNumber(options, names, fallback) {
+  for (const name of names) if (options[name] !== undefined) return finiteOr(options[name], fallback);
+  return fallback;
+}
+
+export function makeDirection(sources = [], noise, opts = {}, shorelines = null) {
+  // Accept the shoreline array as the third argument as well as through the
+  // options object. The latter keeps the existing options call shape intact.
+  const options = Array.isArray(opts) ? (shorelines && !Array.isArray(shorelines) ? shorelines : {})
+    : (opts && typeof opts === 'object' ? opts : {});
+  const shorelineData = Array.isArray(opts) ? opts
+    : shorelines || options.shores || options.shorelines || options.water?.shores || options.boundaries || options.boundary;
+  const amp = optionNumber(options, ['noiseAmp'], 0);
+  const scale = optionNumber(options, ['noiseScale'], 1 / 150);
+  const fallbackAngle = optionNumber(options, ['defaultAngle'], 0);
+  const boundarySigma = sigmaOr(optionNumber(options, ['boundarySigma', 'shoreSigma', 'shorelineSigma'], 120), 120);
+  const boundaryWeight = optionNumber(options, ['boundaryWeight', 'shoreWeight', 'shorelineWeight'], 2);
+  const boundaries = boundaryBases(shorelineData, boundarySigma, boundaryWeight);
+  const basisSources = Array.isArray(sources) ? sources : [];
+  return (x, z) => {
+    const px = finiteOr(x, 0), pz = finiteOr(z, 0);
+    let tensorXX = 0, tensorXZ = 0;
+    const addBasis = (angle, weight) => {
+      if (!Number.isFinite(angle) || !Number.isFinite(weight) || weight <= 0) return;
+      tensorXX += Math.cos(2 * angle) * weight;
+      tensorXZ += Math.sin(2 * angle) * weight;
+    };
+    for (const source of basisSources) {
+      if (!source || typeof source !== 'object') continue;
+      const sx = finiteOr(source.x, 0), sz = finiteOr(source.z, 0);
+      const dx = px - sx, dz = pz - sz;
+      const w = sourceWeight(source, dx * dx + dz * dz);
+      if (!w) continue;
+      let angle = finiteOr(source.angle, 0);
+      if (source.type === 'radial') angle = (dx === 0 && dz === 0) ? 0 : Math.atan2(dz, dx);
+      addBasis(angle, w);
+    }
+    for (const boundary of boundaries) {
+      const nearest = pointSegDist(px, pz, boundary.ax, boundary.az, boundary.bx, boundary.bz);
+      const w = boundary.weight * rbfWeight(nearest.d * nearest.d, boundary.sigma);
+      addBasis(boundary.angle, w);
+    }
+    let angle = Math.hypot(tensorXX, tensorXZ) > 1e-12 ? Math.atan2(tensorXZ, tensorXX) / 2 : fallbackAngle;
+    if (amp && typeof noise === 'function') {
+      const n = noise(px * scale + 17.3, pz * scale - 4.1);
+      if (Number.isFinite(n)) angle += n * amp;
+    }
+    angle %= Math.PI;
+    if (angle < 0) angle += Math.PI;
+    if (angle >= Math.PI) angle = 0;
+    return Number.isFinite(angle) ? angle : 0;
   };
 }
 

@@ -10,6 +10,7 @@ import { resolvePreset } from '../src/presets.js';
 import { hashSeed } from '../src/rng.js';
 import { VIRTUAL } from '../src/graph.js';
 import { TRAFFIC_SAMPLE_COUNT, buildDrivableAdjacency, lengthBudgetDijkstra, sampleTraffic, shortestPath, positionOnRoute } from '../src/routing.js';
+import { makeDirection, makeNoise, makeWater } from '../src/fields.js';
 import {
   segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
   polyIntersectsRect,
@@ -25,6 +26,54 @@ const failures = [];
 const totals = { corridorLen: [], faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 };
 
 function check(seed, cond, msg) { if (!cond) failures.push(`${seed}: ${msg}`); }
+
+function checkDirectionField() {
+  const straight = makeDirection([
+    { type: 'grid', angle: 0, x: 0, z: 0, sigma: Infinity, weight: 1 },
+  ], makeNoise('focused/direction'), { noiseAmp: 0 });
+  check('focused/direction-grid', straight(37, -19) === 0, 'global grid basis drifted');
+
+  const radial = makeDirection([
+    { type: 'radial', x: 0, z: 0, sigma: Infinity, weight: 1 },
+  ], null, { noiseAmp: 0 });
+  check('focused/direction-radial', Math.abs(radial(0, 1) - Math.PI / 2) < 1e-12, 'radial basis is not outward');
+  check('focused/direction-radial', radial(0, 0) === 0, 'radial center is not deterministic');
+
+  const exactPiGrid = makeDirection([
+    { type: 'grid', angle: Math.PI, x: 0, z: 0, sigma: Infinity, weight: 1 },
+  ], null, { noiseAmp: 0 });
+  check('focused/direction-range', exactPiGrid(0, 0) >= 0 && exactPiGrid(0, 0) < Math.PI,
+    'exact Math.PI grid angle escaped [0,pi)');
+  check('focused/direction-range', exactPiGrid(0, 0) === 0, 'exact Math.PI grid angle was not canonicalized');
+
+  const westwardRadial = makeDirection([
+    { type: 'radial', x: 0, z: 0, sigma: Infinity, weight: 1 },
+  ], null, { noiseAmp: 0 });
+  check('focused/direction-range', westwardRadial(-1, 0) >= 0 && westwardRadial(-1, 0) < Math.PI,
+    'westward radial angle escaped [0,pi)');
+  check('focused/direction-range', westwardRadial(-1, 0) === 0, 'westward radial angle was not canonicalized');
+
+  const blended = makeDirection([
+    { type: 'grid', angle: 0, x: 0, z: 0, sigma: 10, weight: 2 },
+    { type: 'grid', angle: Math.PI / 4, x: 10, z: 0, sigma: 10, weight: 1 },
+  ], null, { noiseAmp: 0 });
+  const expected = Math.atan2(Math.exp(-1), 2) / 2;
+  check('focused/direction-tensor', Math.abs(blended(0, 0) - expected) < 1e-12, 'tensor RBF blend is incorrect');
+  const repeat = makeDirection([
+    { type: 'grid', angle: 0, x: 0, z: 0, sigma: 10, weight: 2 },
+    { type: 'grid', angle: Math.PI / 4, x: 10, z: 0, sigma: 10, weight: 1 },
+  ], null, { noiseAmp: 0 });
+  check('focused/direction-tensor', blended(3, 4) === repeat(3, 4), 'tensor field is not deterministic');
+
+  const coast = makeWater({ kind: 'coast', edge: 0 }, 100);
+  const shoreline = makeDirection([
+    { type: 'grid', angle: 0, x: 0, z: 0, sigma: Infinity, weight: 1 },
+  ], null, { noiseAmp: 0, shores: coast.shores });
+  check('focused/direction-shore', Math.abs(shoreline(0, 0) - Math.PI / 2) < 1e-12, 'shoreline field is not tangent-aligned');
+  check('focused/direction-shore', shoreline(0, 0) >= 0 && shoreline(0, 0) < Math.PI, 'shoreline angle is outside [0,pi)');
+}
+
+checkDirectionField();
 
 function checkFootprints(seed, m, requireCourtyard = false) {
   const footprints = m.buildings.filter(b => b.footprint);
