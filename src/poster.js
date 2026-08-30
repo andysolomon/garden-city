@@ -3,7 +3,7 @@
 // Unlike the original, the metadata panels report real CityModel statistics.
 
 import { RNG } from './rng.js';
-import { posterMeta, themeFor } from './ink.js';
+import { posterMeta, themeFor, anchoredTops } from './ink.js';
 
 const W = 1654, H = 2339; // A-series @2x
 
@@ -38,8 +38,9 @@ export function exportPoster(viewer, model) {
   g.drawImage(canvas, ax, ay, aw, ah);
   restore();
 
-  // level markers over the drawing
-  const maxH = Math.max(60, ...model.buildings.map(b => (b.y || 0) + b.h), ...model.landmarks.map(l => l.h));
+  // level markers over the drawing, from the roofs as the ink renderer
+  // anchors them on the terrain (flat models: y + h, as before)
+  const maxH = Math.max(60, ...anchoredTops(model));
   g.strokeStyle = INK; g.lineWidth = 1; g.font = '20px Courier New';
   for (let l = 0; l < 5; l++) {
     const y = ay + ah * .62 - l * (ah * .105);

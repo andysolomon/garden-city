@@ -7,7 +7,7 @@
 // axis-aligned bbox {x, z, w, d} so rect-only consumers keep working.
 
 import { CITY_SIZE, DENSITY, pickZone, massBuilding } from './common.js';
-import { makeWater, makePopulation, makeDirection, makeExclusion, makeNoise } from './fields.js';
+import { makeWater, makePopulation, makeDirection, makeExclusion, makeNoise, makeElevation } from './fields.js';
 import { growRoads, extractFaces, VIRTUAL } from './graph.js';
 import { buildableArea, subdivideParcels, findFrontage, fitRect } from './blocks.js';
 import { resolvePreset } from './presets.js';
@@ -59,10 +59,18 @@ export function graphFabric(model, land, rng, config) {
 
   const population = makePopulation(centers, size);
   const noise = makeNoise(config.seed + ':noise');
-  const direction = makeDirection(P.sources(rng, growthCenters), noise, {
+  const directionOptions = {
     noiseAmp: P.noiseAmp, noiseScale: P.noiseScale, shores: water.shores,
-  });
-  const fields = { water, population, direction, exclusion, elevation: () => 0 };
+  };
+  if (land.kind === 'coast' || land.kind === 'river') {
+    // Shore influence spans a few local blocks and dominates at the bank;
+    // the RBF still decays before it can flatten the interior preset grammar.
+    directionOptions.boundarySigma = 110;
+    directionOptions.boundaryWeight = 8;
+  }
+  const direction = makeDirection(P.sources(rng, growthCenters), noise, directionOptions);
+  const elevation = makeElevation(config.seed, size);
+  const fields = { water, population, direction, exclusion, elevation };
   model.fields = fields;
   model.centers = centers;
 
@@ -120,6 +128,7 @@ export function graphFabric(model, land, rng, config) {
   for (const b of blocksRaw) {
     if (b.field) continue;
     b.buildable = buildableArea(b.face, g, b.zone, config.detail);
+    if (b.buildable && !footprintOnLand(b.buildable)) b.buildable = null;
     if (!b.buildable) model.stats.offsetDrops++;
   }
 
@@ -180,7 +189,7 @@ export function graphFabric(model, land, rng, config) {
   function makePerimeter(b) {
     const outer = b.buildable;
     if (model.reserved.some(r => polyIntersectsRect(outer, r))) return false;
-    if (outer.some(([x, z]) => water.sdf(x, z) <= .5)) return false;
+    if (!footprintOnLand(outer)) return false;
 
     const box = obb(outer), minDim = Math.min(box.w, box.d);
     if (minDim < 24 || area(outer) < 650) return false;
@@ -244,10 +253,29 @@ export function graphFabric(model, land, rng, config) {
       const rect = fitRect(usable, fr.angle, 0);
       if (!rect || rect.w < 5.5 || rect.d < 5.5) continue;
       if (rng.bool(config.density === 'low' ? .12 : .045)) { vacants.push({ ...rect, dist: b.dist }); continue; }
-      const bs = massBuilding({ ...rect, zone: b.zone, dist: b.dist }, config, dcfg, rng);
+      const bs = massBuilding({ ...rect, zone: b.zone, dist: b.dist }, config, dcfg, rng)
+        .filter(bl => footprintOnLand(orientedRect(bl.cx, bl.cz, bl.w, bl.d, bl.angle || 0)));
       for (const bl of bs) model.buildings.push(bl);
-      parcel.built = true;
+      if (bs.length) parcel.built = true;
     }
+  }
+
+  // A face centroid can be on land while an inset edge still crosses a river
+  // or coast. Sample every buildable/building edge densely enough that the
+  // same signed-distance water field governs the whole footprint, not merely
+  // its centre or corners. Rejection leaves the graph and parcel grammar
+  // unchanged away from the shoreline.
+  function footprintOnLand(poly, clearance = .5, step = 4) {
+    if (!poly?.length) return false;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / step));
+      for (let k = 0; k <= n; k++) {
+        const t = k / n;
+        if (!(water.sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) > clearance)) return false;
+      }
+    }
+    return true;
   }
 }
 

@@ -27,6 +27,11 @@ const totals = { corridorLen: [], faces: 0, blocks: 0, offsetDrops: 0, parcels: 
 
 function check(seed, cond, msg) { if (!cond) failures.push(`${seed}: ${msg}`); }
 
+function lineAngleDistance(a, b) {
+  const d = Math.abs((a - b) % Math.PI);
+  return Math.min(d, Math.PI - d);
+}
+
 function checkDirectionField() {
   const straight = makeDirection([
     { type: 'grid', angle: 0, x: 0, z: 0, sigma: Infinity, weight: 1 },
@@ -69,11 +74,105 @@ function checkDirectionField() {
   const shoreline = makeDirection([
     { type: 'grid', angle: 0, x: 0, z: 0, sigma: Infinity, weight: 1 },
   ], null, { noiseAmp: 0, shores: coast.shores });
-  check('focused/direction-shore', Math.abs(shoreline(0, 0) - Math.PI / 2) < 1e-12, 'shoreline field is not tangent-aligned');
+  check('focused/direction-shore', lineAngleDistance(shoreline(0, 0), Math.PI / 2) < 1e-12, 'shoreline field is not tangent-aligned');
   check('focused/direction-shore', shoreline(0, 0) >= 0 && shoreline(0, 0) < Math.PI, 'shoreline angle is outside [0,pi)');
+
+  const falloff = makeDirection([
+    { type: 'grid', angle: Math.PI / 4, x: 0, z: 0, sigma: Infinity, weight: 1 },
+  ], null, { noiseAmp: 0, shores: coast.shores, boundarySigma: 10, boundaryWeight: 3 });
+  const expectedOneSigma = Math.atan2(1, -3 * Math.exp(-1)) / 2;
+  check('focused/direction-shore-falloff', Math.abs(falloff(10, 0) - expectedOneSigma) < 1e-12,
+    'shoreline RBF does not use point distance');
+  check('focused/direction-shore-falloff', lineAngleDistance(falloff(0, 0), Math.PI / 2)
+    < lineAngleDistance(falloff(10, 0), Math.PI / 2)
+    && lineAngleDistance(falloff(10, 0), Math.PI / 2) < lineAngleDistance(falloff(60, 0), Math.PI / 2),
+  'shoreline influence does not decay with distance');
+
+  const repeatShore = makeDirection([
+    { type: 'grid', angle: Math.PI / 4, x: 0, z: 0, sigma: Infinity, weight: 1 },
+  ], null, { noiseAmp: 0, shores: coast.shores, boundarySigma: 10, boundaryWeight: 3 });
+  check('focused/direction-shore-determinism', [0, 10, 60].every(x => falloff(x, 0) === repeatShore(x, 0)),
+    'shoreline direction is not deterministic');
+
+  const flatSources = [
+    { type: 'grid', angle: .31, x: 0, z: 0, sigma: Infinity, weight: 1 },
+    { type: 'radial', x: 80, z: -40, sigma: 170, weight: .7 },
+  ];
+  const flatNoiseA = makeDirection(flatSources, makeNoise('focused/flat-direction'), { noiseAmp: .2, noiseScale: .07 });
+  const flatNoiseB = makeDirection(flatSources, makeNoise('focused/flat-direction'), {
+    noiseAmp: .2, noiseScale: .07, shores: makeWater({ kind: 'flat' }, 100).shores,
+  });
+  check('focused/direction-flat', [-180, -20, 0, 75, 210].every(x => [-160, 0, 130].every(z => flatNoiseA(x, z) === flatNoiseB(x, z))),
+    'empty shoreline data changed flat direction output');
 }
 
 checkDirectionField();
+
+function shorelineNearest(x, z, shores) {
+  let best = { d: Infinity, angle: 0 };
+  for (const shore of shores) {
+    const points = shore.pts || shore;
+    const count = shore.closed ? points.length : points.length - 1;
+    for (let i = 0; i < count; i++) {
+      const a = points[i], b = points[(i + 1) % points.length];
+      const hit = pointSegDist(x, z, a[0], a[1], b[0], b[1]);
+      if (hit.d < best.d) best = { d: hit.d, angle: Math.atan2(b[1] - a[1], b[0] - a[0]) };
+    }
+  }
+  return best;
+}
+
+function shorelineSignature(m) {
+  const shoreSamples = m.fields.water.shores.flatMap(s => {
+    const points = s.pts, count = s.closed ? points.length : points.length - 1;
+    return Array.from({ length: count }, (_, i) => {
+      const a = points[i], b = points[(i + 1) % points.length];
+      return m.fields.direction((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    });
+  });
+  return JSON.stringify({
+    nodes: m.graph.nodes,
+    edges: m.graph.edges.map(e => [e.a, e.b, e.cls, e.removed]),
+    shoreSamples,
+  });
+}
+
+function checkGeneratedShoreline(seed, config) {
+  const m = generateCity(config), repeat = generateCity({ ...config });
+  const shores = m.fields.water.shores;
+  for (const shore of shores) {
+    const points = shore.pts, count = shore.closed ? points.length : points.length - 1;
+    for (let i = 0; i < count; i++) {
+      const a = points[i], b = points[(i + 1) % points.length];
+      const x = (a[0] + b[0]) / 2, z = (a[1] + b[1]) / 2;
+      check(seed, lineAngleDistance(m.fields.direction(x, z), Math.atan2(b[1] - a[1], b[0] - a[0])) < .3,
+        `generated ${config.land} field is not tangent at shore segment ${i}`);
+    }
+  }
+
+  const nearby = [];
+  for (const e of m.graph.edges) {
+    if (e.removed || VIRTUAL.has(e.cls)) continue;
+    const a = m.graph.nodes[e.a], b = m.graph.nodes[e.b];
+    const x = (a.x + b.x) / 2, z = (a.z + b.z) / 2, near = shorelineNearest(x, z, shores);
+    if (near.d < 110) nearby.push(lineAngleDistance(Math.atan2(b.z - a.z, b.x - a.x), near.angle));
+  }
+  const aligned = nearby.filter(d => d < .45).length;
+  check(seed, nearby.length >= 4 && aligned >= 2 && aligned / nearby.length >= .2,
+    `generated ${config.land} graph lacks boundary-aligned edges (${aligned}/${nearby.length})`);
+  check(seed, shorelineSignature(m) === shorelineSignature(repeat), 'shoreline generation is not deterministic');
+}
+
+for (const [land, pattern] of [
+  ['coast', 'manhattan'], ['coast', 'paris'], ['coast', 'medieval'],
+  ['river', 'manhattan'], ['river', 'paris'], ['river', 'medieval'],
+]) {
+  checkGeneratedShoreline(`focused/${land}-${pattern}`, {
+    seed: `FOCUSED-${land.toUpperCase()}-${pattern.toUpperCase()}`,
+    engine: 'graph', pattern, land, density: 'high', rail: 'none', massing: 'mixed',
+    sector: 'mixed', detail: 'med', life: 'off', air: 'none',
+  });
+}
 
 function checkFootprints(seed, m, requireCourtyard = false) {
   const footprints = m.buildings.filter(b => b.footprint);

@@ -18,6 +18,9 @@ const BASE = {
   stopProb: { arterial: 0, collector: .02, local: .04 },
   bridgeP: { arterial: 1, collector: .45, local: .06 },
   maxBridgeSpan: 150,
+  // Maximum rise/run for each road class. Higher-capacity roads are held to
+  // gentler terrain while local streets may climb more directly.
+  maxGrade: { arterial: .24, collector: .3, local: .36 },
   maxDepth: { arterial: 80, collector: 14, local: 10 },
   delay: { arterial: 1, collector: 3, local: 7 },
   diagonals: 0,
