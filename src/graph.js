@@ -11,11 +11,20 @@
 
 import {
   quantize, dist, angleBetween, angleDiff, segIntersect, pointSegDist,
-  signedArea, isSimple, ccw,
+  signedArea, isSimple, ccw, QUANTUM,
 } from './geom.js';
 import { nearestAligned } from './fields.js';
 
 export const VIRTUAL = new Set(['boundary', 'shore']);
+
+// Grade is enforced on every interior subsegment of at most this length, not
+// just between the two endpoints, so a hump inside a long segment cannot hide
+// behind level ends.
+export const GRADE_SAMPLE_STEP = 4;
+// Shore nodes are quantized, so a point on a shore edge can sit a fraction of
+// a quantum on the water side of the exact shoreline. Anything deeper than
+// this is water for endpoint purposes.
+export const WATER_TOLERANCE = QUANTUM;
 
 // ---------------------------------------------------------------------------
 // Flat graph with spatial hashes
@@ -129,17 +138,76 @@ class Heap {
   get size() { return this.a.length; }
 }
 
+// Retain one drivable network before face extraction. Virtual geometry may
+// connect otherwise separate roads through the boundary or a shoreline, so
+// components are measured using real roads only. Prefer the component with
+// the most edges; equal-sized components resolve to the lowest edge id.
+function retainLargestRoadComponent(g) {
+  const nodeComponent = new Int32Array(g.nodes.length).fill(-1);
+  const edgeComponent = new Int32Array(g.edges.length).fill(-1);
+  const components = [];
+
+  for (let seedEdge = 0; seedEdge < g.edges.length; seedEdge++) {
+    const seed = g.edges[seedEdge];
+    if (seed.removed || VIRTUAL.has(seed.cls) || edgeComponent[seedEdge] !== -1) continue;
+
+    const id = components.length;
+    const component = { firstEdge: seedEdge, edges: [] };
+    components.push(component);
+    const stack = [seed.a];
+    nodeComponent[seed.a] = id;
+    while (stack.length) {
+      const node = stack.pop();
+      for (const edgeId of g.adj[node]) {
+        const edge = g.edges[edgeId];
+        if (edge.removed || VIRTUAL.has(edge.cls)) continue;
+        if (edgeComponent[edgeId] === -1) {
+          edgeComponent[edgeId] = id;
+          component.edges.push(edgeId);
+        }
+        const other = g.other(edgeId, node);
+        if (nodeComponent[other] === -1) {
+          nodeComponent[other] = id;
+          stack.push(other);
+        }
+      }
+    }
+  }
+
+  let keep = -1;
+  for (let id = 0; id < components.length; id++) {
+    const candidate = components[id];
+    const current = components[keep];
+    if (keep === -1 || candidate.edges.length > current.edges.length
+      || (candidate.edges.length === current.edges.length && candidate.firstEdge < current.firstEdge)) keep = id;
+  }
+
+  let removedEdges = 0;
+  for (let edgeId = 0; edgeId < g.edges.length; edgeId++) {
+    if (edgeComponent[edgeId] !== -1 && edgeComponent[edgeId] !== keep) {
+      g.edges[edgeId].removed = true;
+      removedEdges++;
+    }
+  }
+  return { components: components.length, removedEdges };
+}
+
 // ---------------------------------------------------------------------------
 // Growth
 // ---------------------------------------------------------------------------
 // P (growth parameters, see presets.js):
 //   widths, spacing {major, minor}, lenScale, branch, arterialSelfBranch,
 //   popMin, minAngle, snapRadius, extendRadius, minLength, maxTurn, jitter,
-//   stopProb, bridgeP, maxBridgeSpan, maxDepth, delay, diagonals
+//   stopProb, bridgeP, maxBridgeSpan, maxGrade, maxDepth, delay, diagonals
 export function growRoads({ rng, fields, P, size, budget, centers }) {
   const g = new RoadGraph();
   const H = size / 2;
-  const stats = { proposals: 0, rejected: 0, bridges: 0 };
+  const stats = { proposals: 0, rejected: 0, rejectedGrade: 0, rejectedWater: 0, bridges: 0 };
+
+  // Water test shared by proposal starts and committed endpoints. Legacy
+  // fields without a signed distance never place anything in water.
+  const waterSdf = typeof fields.water?.sdf === 'function' ? fields.water.sdf : null;
+  const inWater = (x, z) => waterSdf !== null && waterSdf(x, z) < -WATER_TOLERANCE;
 
   // Boundary square.
   const c = [g.addNode(-H, -H), g.addNode(H, -H), g.addNode(H, H), g.addNode(-H, H)];
@@ -167,6 +235,34 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
     const k = Math.round(angleDiff(nearestAligned(major, heading), major) / (Math.PI / 2));
     const base = (k % 2 === 0) ? P.spacing.major : P.spacing.minor;
     return base * P.lenScale[cls] * (1.2 - .4 * pop) * rng.float(.92, 1.08);
+  };
+
+  // Legacy callers do not always provide terrain. Treat a missing sampler or
+  // non-numeric samples as flat instead of changing their growth behavior.
+  // The grade of a segment is the steepest of its sampled subsegments (each
+  // at most GRADE_SAMPLE_STEP long), so interior relief counts as well as the
+  // endpoint difference.
+  const segmentGrade = (ax, az, bx, bz) => {
+    if (typeof fields.elevation !== 'function') return 0;
+    const run = dist(ax, az, bx, bz);
+    if (!(run > 0)) return 0;
+    const n = Math.max(1, Math.ceil(run / GRADE_SAMPLE_STEP)), piece = run / n;
+    let prev = fields.elevation(ax, az), worst = 0;
+    if (!Number.isFinite(prev)) return 0;
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      const h = fields.elevation(ax + (bx - ax) * t, az + (bz - az) * t);
+      if (!Number.isFinite(h)) return 0;
+      worst = Math.max(worst, Math.abs(h - prev) / piece);
+      prev = h;
+    }
+    return worst;
+  };
+
+  const withinGrade = (ax, az, bx, bz, cls, bridge = false) => {
+    if (bridge) return true;
+    const limit = P.maxGrade?.[cls];
+    return !Number.isFinite(limit) || segmentGrade(ax, az, bx, bz) <= limit + 1e-12;
   };
 
   // Seed proposals: arterials in the four field directions at every center.
@@ -211,6 +307,10 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
   function commit(from, ex, ez, cls, opts = {}) {
     const A = g.nodes[from];
     const R = P.extendRadius, S = P.snapRadius;
+    const fail = reason => {
+      if (opts.failure) opts.failure.reason = reason;
+      return null;
+    };
 
     // 4. Extend to edge: pull the endpoint onto a nearby edge (overshooting
     //    slightly so the crossing test below sees a clean intersection).
@@ -258,6 +358,36 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
     } else { endX = quantize(ex); endZ = quantize(ez); }
     if (endNode !== null) { endX = g.nodes[endNode].x; endZ = g.nodes[endNode].z; }
 
+    // Water: only bridges may end in water. A free endpoint that overshot the
+    // shoreline (the caller aims one unit past it so the shore edge splits)
+    // but missed the shore edge is clamped back onto land along its own ray;
+    // an existing node or split point in water rejects the segment.
+    if (!opts.bridge && inWater(endX, endZ)) {
+      if (endNode !== null || splitAt !== null) {
+        if (opts.countFailures !== false) stats.rejectedWater++;
+        return fail('water');
+      }
+      let lo = 0, hi = 1; // A is on land (proposals never start in water)
+      for (let i = 0; i < 24; i++) {
+        const mid = (lo + hi) / 2;
+        if (inWater(A.x + (endX - A.x) * mid, A.z + (endZ - A.z) * mid)) hi = mid; else lo = mid;
+      }
+      endX = quantize(A.x + (endX - A.x) * lo); endZ = quantize(A.z + (endZ - A.z) * lo);
+      if (inWater(endX, endZ)) {
+        if (opts.countFailures !== false) stats.rejectedWater++;
+        return fail('water');
+      }
+    }
+    // Splitting inserts the crossing point as an endpoint of both replacement
+    // edges. A deep-water split would therefore create a water endpoint on a
+    // nonbridge, or allow repeated bridge splits to create a water-to-water
+    // bridge. Virtual shoreline/boundary edges are excluded: they define the
+    // intended land/water boundary and are not drivable subsegments.
+    if (splitAt !== null && inWater(endX, endZ) && !VIRTUAL.has(g.edges[splitAt].cls)) {
+      if (opts.countFailures !== false) stats.rejectedWater++;
+      return fail('water');
+    }
+
     // 1. Bounds + exclusion (water is handled by the caller via scanWater).
     if (endNode === null && (Math.abs(endX) > H || Math.abs(endZ) > H)) return null;
     if (endNode === null && fields.exclusion(endX, endZ)) return null;
@@ -266,6 +396,21 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
     const L = dist(A.x, A.z, endX, endZ);
     if (L < (endNode !== null ? P.minLength * .4 : P.minLength)) return null;
     if (endNode !== null && g.adj[endNode].some(e => g.other(e, endNode) === from)) return null;
+
+    // Grade is checked only after extension, snapping, and intersection logic
+    // have selected the exact quantized endpoint. A split also creates two
+    // replacement segments, so keep both halves within the existing road's
+    // limit before mutating the graph.
+    let gradeOk = withinGrade(A.x, A.z, endX, endZ, cls, !!opts.bridge);
+    if (gradeOk && splitAt !== null) {
+      const E = g.edges[splitAt], a = g.nodes[E.a], b = g.nodes[E.b];
+      gradeOk = withinGrade(a.x, a.z, endX, endZ, E.cls, E.bridge)
+        && withinGrade(endX, endZ, b.x, b.z, E.cls, E.bridge);
+    }
+    if (!gradeOk) {
+      if (opts.countFailures !== false) stats.rejectedGrade++;
+      return fail('grade');
+    }
 
     // 5. Minimum angle at both ends.
     const ang = Math.atan2(endZ - A.z, endX - A.x);
@@ -322,6 +467,38 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
     return { node, created, joined: splitAt };
   }
 
+  // A grade failure can strand all four seed directions on unusually steep
+  // terrain. Retry a fixed, RNG-free set of shorter rays and small turns. The
+  // original heading is exhausted first, and every heading tries its longest
+  // prefix first. Each candidate still goes through commit(), so its exact
+  // post-extension/post-snap/post-intersection geometry must pass grade.
+  function recoverGrade(from, ang, len, cls, roadId) {
+    const turns = [0, -.25, .25, -.5, .5, -1, 1];
+    const prefixes = [1, .8, .6, .45];
+    const A = g.nodes[from];
+    for (const turn of turns) {
+      const candidateAng = ang + turn * P.maxTurn;
+      for (const prefix of prefixes) {
+        if (turn === 0 && prefix === 1) continue; // the caller just tried it
+        let candidateLen = len * prefix;
+        const water = scanWater(A.x, A.z, candidateAng, candidateLen, P.maxBridgeSpan);
+        const endsAtWater = water.enter !== null;
+        if (endsAtWater) candidateLen = water.enter + 1;
+        if (candidateLen < P.minLength) continue;
+        const failure = {};
+        const r = commit(
+          from,
+          A.x + Math.cos(candidateAng) * candidateLen,
+          A.z + Math.sin(candidateAng) * candidateLen,
+          cls,
+          { roadId, failure, countFailures: false },
+        );
+        if (r) return { r, ang: candidateAng, endsAtWater };
+      }
+    }
+    return null;
+  }
+
   // `through`: the street just crossed an existing road — continue forward
   // but don't branch (the crossed road already provides the cross-streets).
   function successors(p, node, ang, through = false) {
@@ -345,9 +522,24 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
     }
   }
 
+  function continueLandProposal(p, r, ang, endsAtWater = false) {
+    if (endsAtWater) return;
+    // A street that reaches the boundary or the shore ends there. One that
+    // crosses another road (split) or lands on an existing intersection
+    // continues straight through — that is what makes an avenue a corridor
+    // across the city instead of a chain of T-junctions.
+    if (r.joined !== null && VIRTUAL.has(g.edges[r.joined].cls)) return;
+    if (g.adj[r.node].some(e => VIRTUAL.has(g.edges[e].cls))) return;
+    const through = !r.created || r.joined !== null;
+    if (through && !P.through.includes(p.cls)) return; // locals still end at the first road they meet
+    successors(p, r.node, ang, through);
+  }
+
   function processProposal(p) {
     stats.proposals++;
     const A = g.nodes[p.from];
+    // Streets never start in water (a bridge landing is on the far bank).
+    if (inWater(A.x, A.z)) { stats.rejected++; stats.rejectedWater++; return; }
     let ang = p.free ? p.angle : align(A.x, A.z, p.angle);
     if (P.jitter) ang += rng.float(-P.jitter, P.jitter);
     let len = p.len;
@@ -358,8 +550,15 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
       if (eligible) {
         let from = p.from;
         if (w.enter > P.minLength * .6) {
-          const r = commit(from, A.x + cx * (w.enter + 1), A.z + sz * (w.enter + 1), p.cls, { roadId: p.roadId });
-          if (!r) { stats.rejected++; return; }
+          const failure = {};
+          const r = commit(from, A.x + cx * (w.enter + 1), A.z + sz * (w.enter + 1), p.cls, { roadId: p.roadId, failure });
+          if (!r) {
+            const recovered = failure.reason === 'grade'
+              ? recoverGrade(from, ang, w.enter + 1, p.cls, p.roadId) : null;
+            if (recovered) continueLandProposal(p, recovered.r, recovered.ang, recovered.endsAtWater);
+            else stats.rejected++;
+            return;
+          }
           from = r.node;
         }
         const F = g.nodes[from];
@@ -374,27 +573,37 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
       }
       len = w.enter + 1;
       if (len < P.minLength) { stats.rejected++; return; }
-      const r = commit(p.from, A.x + cx * len, A.z + sz * len, p.cls, { roadId: p.roadId });
-      if (!r) stats.rejected++;
+      const failure = {};
+      const r = commit(p.from, A.x + cx * len, A.z + sz * len, p.cls, { roadId: p.roadId, failure });
+      if (!r) {
+        const recovered = failure.reason === 'grade' ? recoverGrade(p.from, ang, len, p.cls, p.roadId) : null;
+        if (recovered) continueLandProposal(p, recovered.r, recovered.ang, recovered.endsAtWater);
+        else stats.rejected++;
+      }
       return; // streets end at the water's edge
     }
-    const r = commit(p.from, A.x + cx * len, A.z + sz * len, p.cls, { roadId: p.roadId });
-    if (!r) { stats.rejected++; return; }
-    // A street that reaches the boundary or the shore ends there. One that
-    // crosses another road (split) or lands on an existing intersection
-    // continues straight through — that is what makes an avenue a corridor
-    // across the city instead of a chain of T-junctions.
-    if (r.joined !== null && VIRTUAL.has(g.edges[r.joined].cls)) return;
-    if (g.adj[r.node].some(e => VIRTUAL.has(g.edges[e].cls))) return;
-    const through = !r.created || r.joined !== null;
-    if (through && !P.through.includes(p.cls)) return; // locals still end at the first road they meet
-    successors(p, r.node, ang, through);
+    const failure = {};
+    const r = commit(p.from, A.x + cx * len, A.z + sz * len, p.cls, { roadId: p.roadId, failure });
+    if (!r) {
+      const recovered = failure.reason === 'grade' ? recoverGrade(p.from, ang, len, p.cls, p.roadId) : null;
+      if (!recovered) { stats.rejected++; return; }
+      continueLandProposal(p, recovered.r, recovered.ang, recovered.endsAtWater);
+      return;
+    }
+    continueLandProposal(p, r, ang);
   }
 
   let guard = 0;
   while (Q.size && realEdges < budget && guard++ < budget * 40) processProposal(Q.pop());
 
-  stats.edges = realEdges; stats.nodes = g.nodes.length; stats.queued = Q.size;
+  const connectivity = retainLargestRoadComponent(g);
+  const liveRoads = g.edges.filter(e => !e.removed && !VIRTUAL.has(e.cls));
+  stats.edges = liveRoads.length;
+  stats.bridges = liveRoads.filter(e => e.bridge).length;
+  stats.roadComponents = liveRoads.length ? 1 : 0;
+  stats.disconnectedComponents = Math.max(0, connectivity.components - stats.roadComponents);
+  stats.disconnectedEdges = connectivity.removedEdges;
+  stats.nodes = g.nodes.length; stats.queued = Q.size;
   return { graph: g, stats };
 }
 

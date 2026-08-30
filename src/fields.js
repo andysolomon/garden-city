@@ -6,7 +6,7 @@
 //   population(x, z)  → 0..1 development pressure         (sum of Gaussians)
 //   direction(x, z)   → major street angle in [0, π)      (blended angle field)
 //   exclusion(x, z)   → true inside no-build footprints   (station, etc.)
-//   elevation(x, z)   → 0 (stub; V2.1)
+//   elevation(x, z)   → metres, bounded to a small city-scale land range
 
 import { hashSeed } from './rng.js';
 import { pointInPolygon, pointSegDist, angleDiff } from './geom.js';
@@ -27,6 +27,29 @@ export function makeNoise(seed) {
     const fx = fade(x - ix), fz = fade(z - iz);
     const a = lattice(ix, iz), b = lattice(ix + 1, iz), c = lattice(ix, iz + 1), d = lattice(ix + 1, iz + 1);
     return (a + (b - a) * fx) * (1 - fz) + (c + (d - c) * fx) * fz;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Elevation: a deterministic, metre-scale terrain field. The factory owns a
+// namespaced noise stream and never consumes a city's geometry RNG, so adding
+// terrain cannot reshuffle roads, parcels, or life placement.
+// ---------------------------------------------------------------------------
+export const ELEVATION_MAX = 72;
+
+export function makeElevation(seed, size = 900) {
+  const extent = Number.isFinite(size) && size > 0 ? size : 900;
+  const macro = makeNoise(`${seed}:elevation:macro`);
+  const detail = makeNoise(`${seed}:elevation:detail`);
+  const macroScale = extent / 3.75;
+  const detailScale = extent / 9.375;
+
+  return (x, z) => {
+    const px = Number.isFinite(x) ? x : 0;
+    const pz = Number.isFinite(z) ? z : 0;
+    const n = macro(px / macroScale, pz / macroScale) * .72
+      + detail(px / detailScale + 13.7, pz / detailScale - 8.2) * .28;
+    return Math.max(0, Math.min(ELEVATION_MAX, (n + 1) * .5 * ELEVATION_MAX));
   };
 }
 
@@ -110,7 +133,7 @@ export function makePopulation(centers, size) {
 //           { type: 'radial', x, z, sigma, weight }]
 // sigma = Infinity gives a global source. opts.shores accepts the shoreline
 // array returned by makeWater(); each valid segment contributes its tangent
-// basis using point-to-segment distance.
+// basis using a point-to-segment RBF falloff.
 // ---------------------------------------------------------------------------
 function finiteOr(value, fallback) { return Number.isFinite(value) ? value : fallback; }
 
@@ -201,15 +224,24 @@ export function makeDirection(sources = [], noise, opts = {}, shorelines = null)
       if (source.type === 'radial') angle = (dx === 0 && dz === 0) ? 0 : Math.atan2(dz, dx);
       addBasis(angle, w);
     }
+    const sourceMagnitude = Math.hypot(tensorXX, tensorXZ);
+    let boundaryMass = 0;
     for (const boundary of boundaries) {
       const nearest = pointSegDist(px, pz, boundary.ax, boundary.az, boundary.bx, boundary.bz);
       const w = boundary.weight * rbfWeight(nearest.d * nearest.d, boundary.sigma);
+      if (w > 0 && Number.isFinite(w)) boundaryMass += w;
       addBasis(boundary.angle, w);
     }
     let angle = Math.hypot(tensorXX, tensorXZ) > 1e-12 ? Math.atan2(tensorXZ, tensorXX) / 2 : fallbackAngle;
     if (amp && typeof noise === 'function') {
       const n = noise(px * scale + 17.3, pz * scale - 4.1);
-      if (Number.isFinite(n)) angle += n * amp;
+      if (Number.isFinite(n)) {
+        // Keep organic variation in the interior, but let a nearby shoreline
+        // remain visibly tangent-aligned. This factor is exactly 1 when no
+        // boundary data is supplied, preserving the flat-city path.
+        const boundaryInfluence = boundaryMass / (boundaryMass + sourceMagnitude || 1);
+        angle += n * amp * (1 - Math.min(1, boundaryInfluence));
+      }
     }
     angle %= Math.PI;
     if (angle < 0) angle += Math.PI;

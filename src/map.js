@@ -1,13 +1,14 @@
 // Top-down debug map (docs/V2-ROAD-GRAPH.md §8, P0). Plain 2D canvas,
-// orthographic, with per-layer toggles: fields (population, direction,
-// water), graph nodes/edges by class, faces, blocks, parcels, buildings.
+// orthographic, with per-layer toggles: fields (elevation, population,
+// direction, water), graph nodes/edges by class, faces, blocks, parcels, buildings.
 // Debugging a planar graph through the isometric ink view is not possible;
 // this is where the graph is actually looked at.
 
 import { VIRTUAL } from './graph.js';
+import { ELEVATION_MAX } from './fields.js';
 
 export const LAYERS = [
-  ['water', 'WATER', true], ['population', 'POPULATION', false], ['direction', 'DIRECTION', false],
+  ['water', 'WATER', true], ['elevation', 'ELEVATION', false], ['population', 'POPULATION', false], ['direction', 'DIRECTION', false],
   ['faces', 'FACES', true], ['blocks', 'BUILDABLE', false], ['parcels', 'PARCELS', true],
   ['buildings', 'BUILDINGS', true], ['edges', 'EDGES', true], ['nodes', 'NODES', false],
   ['spurs', 'SPURS', true], ['labels', 'LABELS', false], ['reserved', 'RESERVED', true],
@@ -17,6 +18,9 @@ export const LAYERS = [
 const CLASS_COLORS = {
   arterial: '#e8501e', collector: '#1c1a18', local: '#6b6b6b', boundary: '#b0a8a0', shore: '#3e7f9c',
 };
+
+const ELEVATION_LOW = [47, 96, 71];
+const ELEVATION_HIGH = [224, 197, 132];
 
 // Draw the model into a 2D context, fitting the city square into (w, h).
 // `view` = { scale, ox, oz } maps world → canvas; pass null to fit.
@@ -51,6 +55,23 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
         ctx.fillStyle = paper;
         path(f.water.shores[0].pts); ctx.fill();
       } else ctx.fillRect(X(wtr.x), Z(wtr.z), wtr.w * v.scale, wtr.d * v.scale);
+    }
+  }
+  if (f && on('elevation') && typeof f.elevation === 'function') {
+    const step = 12;
+    const isLand = typeof f.water?.isLand === 'function' ? f.water.isLand : () => true;
+    for (let x = -S / 2; x < S / 2; x += step) for (let z = -S / 2; z < S / 2; z += step) {
+      const cx = x + step / 2, cz = z + step / 2;
+      if (![[x, z], [x + step, z], [x + step, z + step], [x, z + step], [cx, cz]]
+        .every(([px, pz]) => isLand(px, pz))) continue;
+      const value = f.elevation(cx, cz);
+      if (!Number.isFinite(value)) continue;
+      const t = Math.max(0, Math.min(1, value / ELEVATION_MAX));
+      const r = Math.round(ELEVATION_LOW[0] + (ELEVATION_HIGH[0] - ELEVATION_LOW[0]) * t);
+      const g = Math.round(ELEVATION_LOW[1] + (ELEVATION_HIGH[1] - ELEVATION_LOW[1]) * t);
+      const b = Math.round(ELEVATION_LOW[2] + (ELEVATION_HIGH[2] - ELEVATION_LOW[2]) * t);
+      ctx.fillStyle = `rgba(${r},${g},${b},.82)`;
+      ctx.fillRect(X(x), Z(z), step * v.scale + .5, step * v.scale + .5);
     }
   }
   if (f && on('direction')) {
