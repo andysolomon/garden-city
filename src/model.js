@@ -152,12 +152,22 @@ function makeLand(kind, rng, model) {
   if (kind === 'coast') {
     const edge = rng.float(-250, -120);
     model.water.push({ x: -CITY_SIZE * .72, z: -CITY_SIZE * .56, w: edge + CITY_SIZE * .72, d: CITY_SIZE * 1.12, type: 'coast' });
-    return { kind, edge, mask: cx => cx > edge + 22 };
+    return { kind, edge, mask: (cx, cz, rect) => rect ? rect.x >= edge : cx > edge + 22 };
   }
   if (kind === 'island') {
     const rx = CITY_SIZE * .43, rz = CITY_SIZE * .38;
     model.water.push({ x: -CITY_SIZE * .65, z: -CITY_SIZE * .65, w: CITY_SIZE * 1.3, d: CITY_SIZE * 1.3, type: 'sea', rx, rz });
-    return { kind, rx, rz, mask: (cx, cz) => (cx / rx) ** 2 + (cz / rz) ** 2 < 1 };
+    const shore = Array.from({ length: 56 }, (_, i) => {
+      const t = i / 56 * Math.PI * 2;
+      return [Math.cos(t) * rx, Math.sin(t) * rz];
+    });
+    const onLand = (x, z) => pointInPolygon(x, z, shore);
+    return { kind, rx, rz, mask: (cx, cz, rect) => {
+      const corners = rect
+        ? [[rect.x, rect.z], [rect.x + rect.w, rect.z], [rect.x + rect.w, rect.z + rect.d], [rect.x, rect.z + rect.d]]
+        : [[cx, cz]];
+      return corners.every(([x, z]) => onLand(x, z));
+    } };
   }
   return { kind: 'flat', mask: () => true };
 }
