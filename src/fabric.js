@@ -9,7 +9,7 @@
 import { CITY_SIZE, DENSITY, pickZone, massBuilding } from './common.js';
 import { makeWater, makePopulation, makeDirection, makeExclusion, makeNoise, makeElevation } from './fields.js';
 import { growRoads, extractFaces, VIRTUAL } from './graph.js';
-import { buildableArea, subdivideParcels, findFrontage, fitRect } from './blocks.js';
+import { buildableArea, subdivideParcels, findFrontage, mergeLandlockedParcels, fitRect } from './blocks.js';
 import { resolvePreset } from './presets.js';
 import { buildCorridors } from './corridors.js';
 import {
@@ -241,23 +241,34 @@ export function graphFabric(model, land, rng, config) {
     const target = targetParcelBase * (1.5 - .9 * b.pop);
     const { parcels, slivers } = subdivideParcels(b.buildable, { targetArea: target, minWidth: 9, rng });
     model.stats.slivers += slivers;
-    for (const poly of parcels) {
-      const fr = findFrontage(poly, b.buildable, b.face, g);
+    const frontageFor = poly => findFrontage(poly, b.buildable, b.face, g);
+    const merged = mergeLandlockedParcels(parcels, frontageFor);
+    for (const { polygon: poly, frontage: fr } of merged.parcels) {
       const parcel = { polygon: poly, zone: b.zone, dist: b.dist, pop: b.pop, frontage: fr, landlocked: !fr, block: b, ...bbox(poly) };
       model.parcels.push(parcel);
       if (!fr) { model.stats.landlocked++; model.parks.push({ polygon: poly, court: true, ...bbox(poly) }); continue; }
       // Reserved corridors take their right-of-way out of the lot.
       let usable = poly;
       for (const r of model.reserved) { usable = trimPolyAgainstRect(usable, r); if (!usable) break; }
-      if (!usable) continue;
+      if (!usable) { courtyardFallback(parcel); continue; }
       const rect = fitRect(usable, fr.angle, 0);
-      if (!rect || rect.w < 5.5 || rect.d < 5.5) continue;
-      if (rng.bool(config.density === 'low' ? .12 : .045)) { vacants.push({ ...rect, dist: b.dist }); continue; }
+      if (!rect || rect.w < 5.5 || rect.d < 5.5) { courtyardFallback(parcel); continue; }
+      if (rng.bool(config.density === 'low' ? .12 : .045)) {
+        parcel.vacant = true;
+        vacants.push({ ...rect, dist: b.dist });
+        continue;
+      }
       const bs = massBuilding({ ...rect, zone: b.zone, dist: b.dist }, config, dcfg, rng)
         .filter(bl => footprintOnLand(orientedRect(bl.cx, bl.cz, bl.w, bl.d, bl.angle || 0)));
+      if (!bs.length) { courtyardFallback(parcel); continue; }
       for (const bl of bs) model.buildings.push(bl);
-      if (bs.length) parcel.built = true;
+      parcel.built = true;
     }
+  }
+
+  function courtyardFallback(parcel) {
+    parcel.fallback = 'courtyard';
+    model.parks.push({ polygon: parcel.polygon, court: true, fallback: 'courtyard', ...bbox(parcel.polygon) });
   }
 
   // A face centroid can be on land while an inset edge still crosses a river

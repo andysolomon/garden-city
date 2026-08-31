@@ -7,7 +7,7 @@
 
 import {
   area, obb, clipHalfPlaneMulti, offsetPolygon, shrinkPolygon, pointSegDist, distToBoundary,
-  pointInPolygon, orientedRect, centroid,
+  pointInPolygon, orientedRect, centroid, segmentsTouch, mergeAdjacentPolygons, sharedBoundaryLength,
 } from './geom.js';
 
 export const SETBACK = {
@@ -95,17 +95,120 @@ export function findFrontage(parcel, buildable, face, g, tol = .6) {
   return best;
 }
 
+// Deterministically fold landlocked lots into the neighbour with which they
+// share the longest boundary. Only components that already contain frontage
+// are processed: an isolated interior component remains available to the
+// courtyard fallback instead of collapsing into one oversized parcel.
+export function mergeLandlockedParcels(polygons, frontageFor, tol = 1e-6) {
+  const lots = polygons.map((polygon, id) => ({ polygon, id, frontage: frontageFor(polygon), pending: false }));
+  const adjacent = lots.map(() => []);
+  for (let i = 0; i < lots.length; i++) for (let j = i + 1; j < lots.length; j++) {
+    if (sharedBoundaryLength(lots[i].polygon, lots[j].polygon, tol) <= tol) continue;
+    adjacent[i].push(j); adjacent[j].push(i);
+  }
+
+  const seen = new Uint8Array(lots.length);
+  for (let start = 0; start < lots.length; start++) {
+    if (seen[start]) continue;
+    const component = [], queue = [start];
+    seen[start] = 1;
+    for (let q = 0; q < queue.length; q++) {
+      const i = queue[q]; component.push(i);
+      for (const j of adjacent[i]) if (!seen[j]) { seen[j] = 1; queue.push(j); }
+    }
+    if (component.some(i => lots[i].frontage)) {
+      for (const i of component) lots[i].pending = !lots[i].frontage;
+    }
+  }
+
+  let merged = 0;
+  while (true) {
+    const source = lots.find(lot => lot.pending);
+    if (!source) break;
+    source.pending = false;
+    let best = null;
+    for (const target of lots) {
+      if (target === source) continue;
+      const shared = sharedBoundaryLength(source.polygon, target.polygon, tol);
+      if (shared <= tol) continue;
+      const polygon = mergeAdjacentPolygons(source.polygon, target.polygon, tol);
+      if (!polygon) continue;
+      if (!best || shared > best.shared + tol || (Math.abs(shared - best.shared) <= tol && target.id < best.target.id)) {
+        best = { target, polygon, shared };
+      }
+    }
+    if (!best) continue;
+    best.target.polygon = best.polygon;
+    best.target.frontage = frontageFor(best.polygon);
+    best.target.pending = !best.target.frontage;
+    lots.splice(lots.indexOf(source), 1);
+    merged++;
+  }
+
+  return { parcels: lots.map(({ polygon, frontage }) => ({ polygon, frontage })), merged };
+}
+
 // Largest oriented rectangle (at `angle`) that fits inside the parcel after
-// an inset. Iteratively shrinks until all four corners are inside.
+// an inset. Iteratively shrinks until the complete rectangle is inside; corner
+// checks alone can bridge an exterior notch in a concave parcel.
 export function fitRect(parcel, angle, inset) {
   const box = obb(parcel, angle);
-  let w = box.w - inset * 2, d = box.d - inset * 2;
-  const [cx, cz] = centroid(parcel);
-  for (let k = 0; k < 16; k++) {
-    if (w < 4 || d < 4) return null;
-    const corners = orientedRect(cx, cz, w, d, angle);
-    if (corners.every(([x, z]) => pointInPolygon(x, z, parcel))) return { cx, cz, w, d, angle };
-    w *= .9; d *= .9;
+  const w0 = box.w - inset * 2, d0 = box.d - inset * 2;
+  if (w0 < 4 || d0 < 4) return null;
+
+  // The area centroid is the legacy first choice and remains the only choice
+  // for the usual convex parcel. A concave union can put it in a notch, so
+  // continue with a fixed OBB lattice of interior centers when that choice
+  // cannot contain a complete rectangle.
+  for (const [cx, cz] of interiorCandidates(parcel, angle, box)) {
+    let w = w0, d = d0;
+    for (let k = 0; k < 16; k++) {
+      if (w < 4 || d < 4) break;
+      const corners = orientedRect(cx, cz, w, d, angle);
+      if (rectContained(corners, parcel)) return { cx, cz, w, d, angle };
+      w *= .9; d *= .9;
+    }
   }
   return null;
+}
+
+function interiorCandidates(parcel, angle, box) {
+  const candidates = [], seen = new Set();
+  const add = (x, z) => {
+    if (!pointInPolygon(x, z, parcel)) return;
+    const key = `${x.toFixed(9)},${z.toFixed(9)}`;
+    if (seen.has(key)) return;
+    seen.add(key); candidates.push([x, z]);
+  };
+
+  const [cx, cz] = centroid(parcel);
+  add(cx, cz);
+  add(box.cx, box.cz);
+
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const nu = Math.min(24, Math.max(4, Math.ceil(box.w / 8)));
+  const nv = Math.min(24, Math.max(4, Math.ceil(box.d / 8)));
+  for (let iv = 1; iv <= nv; iv++) {
+    const v = box.v0 + box.d * iv / (nv + 1);
+    for (let iu = 1; iu <= nu; iu++) {
+      const u = box.u0 + box.w * iu / (nu + 1);
+      add(u * c - v * s, u * s + v * c);
+    }
+  }
+  return candidates;
+}
+
+// For a simple polygon, a convex rectangle with all corners inside is
+// contained unless one of its edges crosses the polygon boundary. Checking
+// those crossings catches concave notches without changing convex placement.
+function rectContained(corners, parcel) {
+  if (!corners.every(([x, z]) => pointInPolygon(x, z, parcel))) return false;
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i], b = corners[(i + 1) % corners.length];
+    for (let j = 0; j < parcel.length; j++) {
+      const p = parcel[j], q = parcel[(j + 1) % parcel.length];
+      if (segmentsTouch(a[0], a[1], b[0], b[1], p[0], p[1], q[0], q[1])) return false;
+    }
+  }
+  return true;
 }
