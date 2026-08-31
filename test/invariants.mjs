@@ -13,8 +13,8 @@ import { TRAFFIC_SAMPLE_COUNT, buildDrivableAdjacency, lengthBudgetDijkstra, sam
 import { makeDirection, makeNoise, makeWater } from '../src/fields.js';
 import { fitRect, mergeLandlockedParcels } from '../src/blocks.js';
 import {
-  segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
-  polyIntersectsRect, mergeAdjacentPolygons, sharedBoundaryLength,
+  segmentsTouch, segIntersect, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
+  polyIntersectsRect, mergeAdjacentPolygons, sharedBoundaryLength, offsetPolygon, shrinkPolygonMulti,
 } from '../src/geom.js';
 
 const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
@@ -165,6 +165,41 @@ function checkParcelMerge() {
 }
 
 checkParcelMerge();
+
+// A six-metre neck disappears under a five-metre inset. The bounded split
+// path must retain the two valid lobes instead of dropping the whole block.
+{
+  const face = [[0, 0], [30, 0], [30, 12], [50, 12], [50, 0], [80, 0], [80, 30],
+    [50, 30], [50, 18], [30, 18], [30, 30], [0, 30]];
+  const dists = face.map(() => 5);
+  const pieces = shrinkPolygonMulti(face, dists);
+  check('focused/split-offset', offsetPolygon(face, dists) === null, 'fixture does not exercise the split-event fallback');
+  check('focused/split-offset', pieces.length === 2, `split inset retained ${pieces.length} pieces instead of 2`);
+  check('focused/split-offset', pieces.every(piece => signedArea(piece) > 0 && isSimple(piece) && area(piece) === 400),
+    'split inset pieces are not positive simple 400m² lobes');
+  check('focused/split-offset', !ringsInteriorOverlap(pieces[0], pieces[1]), 'split inset lobes overlap');
+  check('focused/split-offset', JSON.stringify(pieces) === JSON.stringify(shrinkPolygonMulti(face, dists)),
+    'split inset is not deterministic');
+}
+
+function ringWithinPolygon(ring, container, tol = 1e-3) {
+  return ring.every((a, i) => {
+    const b = ring[(i + 1) % ring.length];
+    return [a, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]].every(([x, z]) =>
+      pointInPolygon(x, z, container) || distToBoundary(x, z, container) < tol);
+  });
+}
+
+function ringsInteriorOverlap(a, b, tol = 1e-6) {
+  if (a.some(([x, z]) => pointInPolygon(x, z, b) && distToBoundary(x, z, b) > tol)) return true;
+  if (b.some(([x, z]) => pointInPolygon(x, z, a) && distToBoundary(x, z, a) > tol)) return true;
+  for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
+    const p = a[i], q = a[(i + 1) % a.length], r = b[j], s = b[(j + 1) % b.length];
+    const hit = segIntersect(p[0], p[1], q[0], q[1], r[0], r[1], s[0], s[1]);
+    if (hit && hit.t > tol && hit.t < 1 - tol && hit.u > tol && hit.u < 1 - tol) return true;
+  }
+  return false;
+}
 
 function ringContainedByParcel(ring, parcel, tol = 1e-6) {
   if (!ring.every(([x, z]) => pointInPolygon(x, z, parcel) || distToBoundary(x, z, parcel) <= tol)) return false;
@@ -654,15 +689,22 @@ for (let i = 0; i < N; i++) {
   // 5. Parcels lie inside their block; Σ parcel areas ≤ buildable area.
   {
     const perBlock = new Map();
+    for (const b of m.blocks) for (const [i, piece] of (b.buildablePieces || []).entries()) {
+      check(seed, signedArea(piece) > 0 && isSimple(piece) && area(piece) > 0, 'buildable piece is not positive and simple');
+      check(seed, ringWithinPolygon(piece, b.face.polygon), 'buildable piece outside owning face');
+      for (let j = 0; j < i; j++) check(seed, !ringsInteriorOverlap(piece, b.buildablePieces[j]), 'buildable pieces overlap');
+    }
     for (const p of m.parcels) {
-      const B = p.block.buildable;
+      const pieces = p.block.buildablePieces || [p.block.buildable];
+      const B = pieces.find(piece => ringWithinPolygon(p.polygon, piece));
       check(seed, signedArea(p.polygon) > 0 && isSimple(p.polygon) && area(p.polygon) > 0, 'parcel polygon is not positive and simple');
-      for (const [x, z] of p.polygon) {
-        check(seed, pointInPolygon(x, z, B) || distToBoundary(x, z, B) < 1e-3, `parcel vertex outside block`);
-      }
+      check(seed, !!B, 'parcel is outside every owning buildable piece');
       perBlock.set(p.block, (perBlock.get(p.block) || 0) + area(p.polygon));
     }
-    for (const [b, a] of perBlock) check(seed, a <= area(b.buildable) * (1 + 1e-6), `parcel area ${a.toFixed(0)} exceeds block ${area(b.buildable).toFixed(0)}`);
+    for (const [b, a] of perBlock) {
+      const unionArea = (b.buildablePieces || [b.buildable]).reduce((sum, piece) => sum + area(piece), 0);
+      check(seed, a <= unionArea * (1 + 1e-6), `parcel area ${a.toFixed(0)} exceeds buildable union ${unionArea.toFixed(0)}`);
+    }
   }
 
   // 6. Every built parcel has frontage.
