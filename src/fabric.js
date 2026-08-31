@@ -94,7 +94,7 @@ export function graphFabric(model, land, rng, config) {
     const entry = { polygon, cls: e.cls, type: e.cls === 'arterial' ? 'arterial' : 'street', width: e.width, a: [a.x, a.z], b: [b.x, b.z], angle, len, cx, cz, edge: i, bridge: e.bridge, ...bbox(polygon) };
     if (e.bridge) model.bridges.push(entry); else model.roads.push(entry);
   }
-  model.corridors = buildCorridors(g, config.seed);
+  model.corridors = buildCorridors(g, config.seed, config.massing);
   model.stats.corridors = model.corridors.length;
   for (let n = 0; n < g.nodes.length; n++) {
     const inc = g.adj[n].filter(e => !g.edges[e].removed && !VIRTUAL.has(g.edges[e].cls));
