@@ -21,12 +21,111 @@ const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
 const LANDS = ['flat', 'river', 'coast', 'island'];
 const DENS = ['low', 'med', 'high', 'extreme'];
 const RAILS = ['none', 'metro', 'elevated', 'terminal'];
+const ENGINES = ['graph', 'bsp'];
 const N = Number(process.argv[2] || 100);
 
 const failures = [];
-const totals = { corridorLen: [], faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 };
+const makeTotals = () => ({ cities: 0, corridorLen: [], roads: 0, bridges: 0, faces: 0, blocks: 0, offsetDrops: 0, parcels: 0, landlocked: 0, slivers: 0, degenerate: 0, buildings: 0, ms: 0 });
+const totals = Object.fromEntries(ENGINES.map(engine => [engine, makeTotals()]));
 
 function check(seed, cond, msg) { if (!cond) failures.push(`${seed}: ${msg}`); }
+
+function checkRing(seed, ring, label) {
+  check(seed, Array.isArray(ring) && ring.length >= 3, `${label} is not a polygon ring`);
+  if (!Array.isArray(ring) || ring.length < 3) return;
+  check(seed, ring.every(p => Array.isArray(p) && p.length >= 2 && p.slice(0, 2).every(Number.isFinite)), `${label} has non-finite vertices`);
+  if (ring.every(p => Array.isArray(p) && p.length >= 2 && p.slice(0, 2).every(Number.isFinite))) {
+    check(seed, signedArea(ring) > 0 && isSimple(ring), `${label} is not positive and simple`);
+  }
+}
+
+function checkModelContract(seed, model, engine) {
+  check(seed, model.engine === engine, `model engine label is not ${engine}`);
+  const lists = ['roads', 'bridges', 'blocks', 'parks', 'plazas', 'parcels', 'buildings', 'landmarks', 'water', 'reserved', 'trees', 'cars', 'drones', 'cranes'];
+  for (const list of lists) check(seed, Array.isArray(model[list]), `${list} is not an array`);
+
+  const rectEntries = ['blocks', 'parks', 'plazas', 'parcels'];
+  for (const list of rectEntries) for (const [i, entry] of (model[list] || []).entries()) {
+    const label = `${list}[${i}]`;
+    checkRing(seed, entry.polygon, `${label}.polygon`);
+    check(seed, ['x', 'z', 'w', 'd'].every(key => Number.isFinite(entry[key])) && entry.w > 0 && entry.d > 0,
+      `${label} lost positive bbox fields`);
+  }
+
+  for (const [list, entries] of [['roads', model.roads], ['bridges', model.bridges]]) for (const [i, entry] of (entries || []).entries()) {
+    const label = `${list}[${i}]`;
+    checkRing(seed, entry.polygon, `${label}.polygon`);
+    check(seed, ['x', 'z', 'w', 'd', 'width', 'len', 'cx', 'cz', 'angle'].every(key => Number.isFinite(entry[key]))
+      && entry.w > 0 && entry.d > 0 && entry.width > 0 && entry.len > 0, `${label} lost road axis fields`);
+    check(seed, [entry.a, entry.b].every(p => Array.isArray(p) && p.length >= 2 && p.slice(0, 2).every(Number.isFinite)), `${label} lost road endpoints`);
+    check(seed, typeof entry.type === 'string', `${label} lost road type`);
+  }
+
+  for (const [i, entry] of (model.buildings || []).entries()) {
+    const label = `buildings[${i}]`;
+    check(seed, ['cx', 'cz', 'w', 'd', 'h', 'y', 'angle', 'x', 'z'].every(key => Number.isFinite(entry[key]))
+      && entry.w > 0 && entry.d > 0 && entry.h > 0, `${label} lost building fields`);
+    check(seed, typeof entry.zone === 'string' && typeof entry.style === 'string', `${label} lost zone/style`);
+    if (entry.footprint) checkRing(seed, entry.footprint, `${label}.footprint`);
+    if (entry.courtyard) checkRing(seed, entry.courtyard, `${label}.courtyard`);
+  }
+
+  for (const [i, entry] of (model.landmarks || []).entries()) {
+    const label = `landmarks[${i}]`;
+    check(seed, ['x', 'z', 'w', 'd', 'h', 'angle'].every(key => Number.isFinite(entry[key]))
+      && entry.w > 0 && entry.d > 0 && entry.h > 0, `${label} lost landmark fields`);
+  }
+
+  for (const [i, entry] of (model.reserved || []).entries()) {
+    check(seed, ['x', 'z', 'w', 'd'].every(key => Number.isFinite(entry[key])) && entry.w > 0 && entry.d > 0,
+      `reserved[${i}] lost bbox fields`);
+  }
+
+  if (engine === 'bsp') {
+    check(seed, !model.graph && !model.corridors && !model.stats && !model.traffic && !model.walkshed,
+      'BSP unexpectedly exposes graph or traffic metadata');
+  } else {
+    check(seed, !!model.graph && !!model.corridors && !!model.stats && !!model.traffic, 'graph model lacks graph metadata');
+  }
+}
+
+function modelIsLand(model, x, z) {
+  if (typeof model.fields?.water?.isLand === 'function') return model.fields.water.isLand(x, z);
+  const water = model.water.find(w => w.type === 'river' || w.type === 'coast' || w.type === 'sea');
+  if (!water) return true;
+  if (water.type === 'river') return x <= water.x || x >= water.x + water.w;
+  if (water.type === 'coast') return x >= water.x + water.w;
+  const shore = Array.from({ length: 56 }, (_, i) => {
+    const t = i / 56 * Math.PI * 2;
+    return [Math.cos(t) * water.rx, Math.sin(t) * water.rz];
+  });
+  return pointInPolygon(x, z, shore);
+}
+
+function checkBuildingClearance(seed, model) {
+  for (const [bi, building] of (model.buildings || []).entries()) {
+    const vertices = building.footprint
+      ? building.footprint.concat(building.courtyard || [])
+      : orientedRect(building.cx, building.cz, building.w, building.d, building.angle || 0);
+    for (const [x, z] of vertices) {
+      check(seed, modelIsLand(model, x, z), `building ${bi} at ${x.toFixed(0)},${z.toFixed(0)} in water`);
+      for (const r of model.reserved || []) check(seed,
+        !(x > r.x + .5 && x < r.x + r.w - .5 && z > r.z + .5 && z < r.z + r.d - .5),
+        `building ${bi} corner inside reserved corridor`);
+    }
+  }
+}
+
+function modelSignature(model) {
+  return JSON.stringify(model, (key, value) => {
+    if (key === 'graph' || key === 'fields' || key === 'block' || key === 'face' || typeof value === 'function') return undefined;
+    return value;
+  });
+}
+
+function checkModelDeterminism(seed, model, repeat) {
+  check(seed, hashSeed(modelSignature(model)) === hashSeed(modelSignature(repeat)), 'non-deterministic shared model output');
+}
 
 function lineAngleDistance(a, b) {
   const d = Math.abs((a - b) % Math.PI);
@@ -610,19 +709,34 @@ for (const [seed, pattern, land, density, rail] of [
   check(`focused/${seed}`, rings(m) === rings(repeat), 'non-deterministic perimeter serialization');
 }
 
-for (let i = 0; i < N; i++) {
-  const config = {
-    seed: `T${i}`, engine: 'graph',
-    pattern: PATTERNS[i % PATTERNS.length], land: LANDS[(i >> 1) % LANDS.length],
-    density: DENS[(i >> 3) % DENS.length], rail: RAILS[(i >> 2) % RAILS.length],
-    massing: ['mixed', 'core', 'euro', 'lowrise', 'industrial'][i % 5], sector: 'mixed',
-    detail: 'med', life: 'low', air: 'sparse',
-  };
-  const t0 = performance.now();
-  const m = generateCity(config);
-  totals.ms += performance.now() - t0;
-  const seed = `${config.seed}/${config.pattern}/${config.land}/${config.density}/${config.rail}`;
-  const g = m.graph, P = resolvePreset(config.pattern);
+for (const engine of ENGINES) {
+  const summary = totals[engine];
+  for (let i = 0; i < N; i++) {
+    const config = {
+      seed: `T${i}`, engine,
+      pattern: PATTERNS[i % PATTERNS.length], land: LANDS[(i >> 1) % LANDS.length],
+      density: DENS[(i >> 3) % DENS.length], rail: RAILS[(i >> 2) % RAILS.length],
+      massing: ['mixed', 'core', 'euro', 'lowrise', 'industrial'][i % 5], sector: 'mixed',
+      detail: 'med', life: 'low', air: 'sparse',
+    };
+    const t0 = performance.now();
+    const m = generateCity(config);
+    summary.ms += performance.now() - t0;
+    const repeat = generateCity({ ...config });
+    summary.cities++;
+    const seed = `${engine}/${config.seed}/${config.pattern}/${config.land}/${config.density}/${config.rail}`;
+    checkModelContract(seed, m, engine);
+    checkBuildingClearance(seed, m);
+    checkModelDeterminism(seed, m, repeat);
+    if (engine !== 'graph') {
+      summary.roads += m.roads.length;
+      summary.bridges += m.bridges.length;
+      summary.blocks += m.blocks.length;
+      summary.parcels += m.parcels.length;
+      summary.buildings += m.buildings.length;
+      continue;
+    }
+    const g = m.graph, P = resolvePreset(config.pattern);
   const live = g.edges.map((e, id) => ({ ...e, id })).filter(e => !e.removed);
 
   // 1. Planarity: no two live edges share a point other than a common endpoint.
@@ -683,7 +797,7 @@ for (let i = 0; i < N; i++) {
     const sum = m.faces.reduce((s, f) => s + f.area, 0);
     const expect = config.land === 'island' ? area(m.fields.water.shores[0].pts) : m.size * m.size;
     check(seed, Math.abs(sum - expect) / expect < 0.005 || m.stats.degenerateFaces > 0, `face areas sum to ${sum.toFixed(0)} vs ${expect.toFixed(0)}`);
-    totals.degenerate += m.stats.degenerateFaces;
+    summary.degenerate += m.stats.degenerateFaces;
   }
 
   // 5. Parcels lie inside their block; Σ parcel areas ≤ buildable area.
@@ -713,13 +827,6 @@ for (let i = 0; i < N; i++) {
   // 7. No building in water or inside a reserved corridor. Polygonal prism
   //    buildings validate both rings; boxes retain their oriented corners.
   checkFootprints(seed, m, config.massing === 'euro');
-  for (const b of m.buildings) {
-    const vertices = b.footprint ? b.footprint.concat(b.courtyard || []) : orientedRect(b.cx, b.cz, b.w, b.d, b.angle);
-    for (const [x, z] of vertices) {
-      check(seed, m.fields.water.isLand(x, z), `building at ${x.toFixed(0)},${z.toFixed(0)} in water`);
-      for (const r of m.reserved) check(seed, !(x > r.x + .5 && x < r.x + r.w - .5 && z > r.z + .5 && z < r.z + r.d - .5), `building corner inside reserved corridor`);
-    }
-  }
 
   // 9. Corridors: every real edge belongs to exactly one corridor, and each
   //    corridor is one connected chain (edge i shares a node with edge i+1).
@@ -755,15 +862,17 @@ for (let i = 0; i < N; i++) {
       tv: trafficSignature(mm),
       c: mm.cars.map(c => [c.x, c.z, c.rot, c.path, c.nodes, c.routeLength, c.t, c.speed, c.originCorridor, c.originCorridorId, c.destinationCorridor, c.destinationCorridorId]),
     });
-    const h1 = hashSeed(ser(m)), h2 = hashSeed(ser(generateCity({ ...config })));
+    const h1 = hashSeed(ser(m)), h2 = hashSeed(ser(repeat));
     check(seed, h1 === h2, 'non-deterministic');
   }
 
-  totals.faces += m.faces.length; totals.blocks += m.blocks.length; totals.offsetDrops += m.stats.offsetDrops;
-  totals.parcels += m.parcels.length; totals.landlocked += m.stats.landlocked; totals.slivers += m.stats.slivers;
-  totals.buildings += m.buildings.length;
+  summary.roads += m.roads.length; summary.bridges += m.bridges.length;
+  summary.faces += m.faces.length; summary.blocks += m.blocks.length; summary.offsetDrops += m.stats.offsetDrops;
+  summary.parcels += m.parcels.length; summary.landlocked += m.stats.landlocked; summary.slivers += m.stats.slivers;
+  summary.buildings += m.buildings.length;
   const lens = m.corridors.filter(c => c.cls === 'arterial').map(c => c.length).sort((a, b) => a - b);
-  if (lens.length) totals.corridorLen.push(lens[lens.length >> 1]);
+  if (lens.length) summary.corridorLen.push(lens[lens.length >> 1]);
+  }
 }
 
 // Focused rail matrix: only graph terminals have stations and therefore a
@@ -817,13 +926,16 @@ for (const life of ['low', 'high']) {
 }
 
 const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';
-if (N >= 100) check('summary', totals.landlocked / Math.max(1, totals.parcels) < .03,
-  `landlocked parcel rate ${pct(totals.landlocked, totals.parcels)} is not materially below the 4.7% baseline`);
-console.log(`cities: ${N}  avg ${(totals.ms / N).toFixed(0)}ms`);
-console.log(`faces ${totals.faces}  blocks ${totals.blocks}  offset drops ${pct(totals.offsetDrops, totals.blocks)}  degenerate faces ${totals.degenerate}`);
-const cl = totals.corridorLen.sort((a, b) => a - b);
-console.log(`arterial corridor median length (median over cities): ${cl[cl.length >> 1].toFixed(0)}`);
-console.log(`parcels ${totals.parcels}  landlocked ${pct(totals.landlocked, totals.parcels)}  slivers dropped ${totals.slivers}  buildings ${totals.buildings}`);
+const graphTotals = totals.graph, bspTotals = totals.bsp;
+if (N >= 100) check('summary/graph', graphTotals.landlocked / Math.max(1, graphTotals.parcels) < .03,
+  `landlocked parcel rate ${pct(graphTotals.landlocked, graphTotals.parcels)} is not materially below the 4.7% baseline`);
+console.log(`graph: cities ${graphTotals.cities}  avg ${(graphTotals.ms / Math.max(1, graphTotals.cities)).toFixed(0)}ms`);
+console.log(`graph: roads ${graphTotals.roads}  bridges ${graphTotals.bridges}  faces ${graphTotals.faces}  blocks ${graphTotals.blocks}  offset drops ${pct(graphTotals.offsetDrops, graphTotals.blocks)}  degenerate faces ${graphTotals.degenerate}`);
+const graphCorridors = graphTotals.corridorLen.sort((a, b) => a - b);
+console.log(`graph: arterial corridor median length (median over cities): ${graphCorridors.length ? graphCorridors[graphCorridors.length >> 1].toFixed(0) : 0}`);
+console.log(`graph: parcels ${graphTotals.parcels}  landlocked ${pct(graphTotals.landlocked, graphTotals.parcels)}  slivers dropped ${graphTotals.slivers}  buildings ${graphTotals.buildings}`);
+console.log(`bsp: cities ${bspTotals.cities}  avg ${(bspTotals.ms / Math.max(1, bspTotals.cities)).toFixed(0)}ms`);
+console.log(`bsp: roads ${bspTotals.roads}  bridges ${bspTotals.bridges}  blocks ${bspTotals.blocks}  parcels ${bspTotals.parcels}  buildings ${bspTotals.buildings}`);
 if (failures.length) {
   console.log(`\n${failures.length} FAILURES`);
   for (const f of failures.slice(0, 40)) console.log('  ' + f);
