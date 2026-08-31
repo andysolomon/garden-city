@@ -156,6 +156,137 @@ export function isSimple(poly) {
   return true;
 }
 
+// Length of the boundary shared by two adjacent simple polygons. Collinear
+// overlaps are measured rather than relying on identical vertex layouts: a
+// split edge on one parcel may correspond to several edges on its neighbour.
+export function sharedBoundaryLength(a, b, tol = 1e-6) {
+  let total = 0;
+  for (let i = 0; i < a.length; i++) {
+    const p = a[i], q = a[(i + 1) % a.length];
+    for (let j = 0; j < b.length; j++) {
+      const r = b[j], s = b[(j + 1) % b.length];
+      const overlap = collinearOverlap(p, q, r, s, tol);
+      if (overlap) total += overlap.length;
+    }
+  }
+  return total;
+}
+
+// Union two non-overlapping simple polygons that share boundary. Boundary
+// edges are split at overlap endpoints, the opposed shared pieces are
+// removed, and the remaining directed pieces are stitched into one ring.
+// Returns null for point contacts, disjoint polygons, holes, or an invalid
+// union, allowing callers to retain their courtyard fallback.
+export function mergeAdjacentPolygons(a, b, tol = 1e-6) {
+  if (!a?.length || !b?.length) return null;
+  const left = ccw(a), right = ccw(b);
+  const as = splitBoundaryAtOverlaps(left, right, tol);
+  const bs = splitBoundaryAtOverlaps(right, left, tol);
+  const dropA = new Uint8Array(as.length), dropB = new Uint8Array(bs.length);
+  let shared = 0;
+
+  for (let i = 0; i < as.length; i++) {
+    for (let j = 0; j < bs.length; j++) {
+      if (dropB[j]) continue;
+      if (!samePoint(as[i].a, bs[j].b, tol) || !samePoint(as[i].b, bs[j].a, tol)) continue;
+      dropA[i] = 1; dropB[j] = 1;
+      shared += Math.hypot(as[i].b[0] - as[i].a[0], as[i].b[1] - as[i].a[1]);
+      break;
+    }
+  }
+  if (shared <= tol) return null;
+
+  const boundary = [];
+  for (let i = 0; i < as.length; i++) if (!dropA[i]) boundary.push(as[i]);
+  for (let i = 0; i < bs.length; i++) if (!dropB[i]) boundary.push(bs[i]);
+  if (boundary.length < 3) return null;
+
+  const used = new Uint8Array(boundary.length);
+  const ring = [boundary[0].a];
+  let current = boundary[0].b;
+  used[0] = 1;
+  ring.push(current);
+  for (let k = 1; k < boundary.length; k++) {
+    let next = -1;
+    for (let i = 0; i < boundary.length; i++) {
+      if (!used[i] && samePoint(boundary[i].a, current, tol)) { next = i; break; }
+    }
+    if (next < 0) return null;
+    used[next] = 1;
+    current = boundary[next].b;
+    ring.push(current);
+  }
+  if (!samePoint(ring[ring.length - 1], ring[0], tol)) return null;
+  ring.pop();
+
+  let merged = simplifyRing(ring, tol);
+  if (signedArea(merged) < 0) merged = merged.reverse();
+  const expected = area(left) + area(right);
+  if (merged.length < 3 || !isSimple(merged) || area(merged) <= EPS) return null;
+  if (Math.abs(area(merged) - expected) > Math.max(1e-5, expected * 1e-8)) return null;
+  return merged;
+}
+
+function collinearOverlap(a, b, c, d, tol) {
+  const vx = b[0] - a[0], vz = b[1] - a[1], len = Math.hypot(vx, vz);
+  if (len <= tol) return null;
+  const crossC = vx * (c[1] - a[1]) - vz * (c[0] - a[0]);
+  const crossD = vx * (d[1] - a[1]) - vz * (d[0] - a[0]);
+  if (Math.abs(crossC) > tol * len || Math.abs(crossD) > tol * len) return null;
+  const l2 = len * len;
+  const tc = ((c[0] - a[0]) * vx + (c[1] - a[1]) * vz) / l2;
+  const td = ((d[0] - a[0]) * vx + (d[1] - a[1]) * vz) / l2;
+  const t0 = Math.max(0, Math.min(tc, td)), t1 = Math.min(1, Math.max(tc, td));
+  if ((t1 - t0) * len <= tol) return null;
+  return { t0, t1, length: (t1 - t0) * len };
+}
+
+function splitBoundaryAtOverlaps(poly, other, tol) {
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const ts = [0, 1];
+    for (let j = 0; j < other.length; j++) {
+      const c = other[j], d = other[(j + 1) % other.length];
+      const overlap = collinearOverlap(a, b, c, d, tol);
+      if (overlap) ts.push(overlap.t0, overlap.t1);
+    }
+    ts.sort((x, y) => x - y);
+    const unique = ts.filter((t, k) => !k || Math.abs(t - ts[k - 1]) > tol);
+    for (let k = 0; k + 1 < unique.length; k++) {
+      const t0 = unique[k], t1 = unique[k + 1];
+      if (t1 - t0 <= tol) continue;
+      out.push({
+        a: [a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0],
+        b: [a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1],
+      });
+    }
+  }
+  return out;
+}
+
+function samePoint(a, b, tol) {
+  return Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol;
+}
+
+function simplifyRing(poly, tol) {
+  const out = poly.slice();
+  let changed = true;
+  while (changed && out.length >= 3) {
+    changed = false;
+    for (let i = 0; i < out.length; i++) {
+      const a = out[(i - 1 + out.length) % out.length], b = out[i], c = out[(i + 1) % out.length];
+      const ab = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const bc = Math.hypot(c[0] - b[0], c[1] - b[1]);
+      const cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+      if (ab <= tol || bc <= tol || Math.abs(cross) <= tol * (ab + bc)) {
+        out.splice(i, 1); changed = true; break;
+      }
+    }
+  }
+  return out;
+}
+
 // Sutherland–Hodgman clip against the half-plane  nx*x + nz*z <= c.
 export function clipHalfPlane(poly, nx, nz, c) {
   const out = [];

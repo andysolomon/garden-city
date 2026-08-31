@@ -11,9 +11,10 @@ import { hashSeed } from '../src/rng.js';
 import { VIRTUAL } from '../src/graph.js';
 import { TRAFFIC_SAMPLE_COUNT, buildDrivableAdjacency, lengthBudgetDijkstra, sampleTraffic, shortestPath, positionOnRoute } from '../src/routing.js';
 import { makeDirection, makeNoise, makeWater } from '../src/fields.js';
+import { fitRect, mergeLandlockedParcels } from '../src/blocks.js';
 import {
   segmentsTouch, signedArea, isSimple, area, pointInPolygon, distToBoundary, orientedRect, pointSegDist,
-  polyIntersectsRect,
+  polyIntersectsRect, mergeAdjacentPolygons, sharedBoundaryLength,
 } from '../src/geom.js';
 
 const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
@@ -108,6 +109,86 @@ function checkDirectionField() {
 
 checkDirectionField();
 
+function checkParcelMerge() {
+  const left = [[0, 0], [10, 0], [10, 10], [0, 10]];
+  // The shared side is deliberately split into two edges on the neighbour.
+  const right = [[10, 0], [20, 0], [20, 10], [10, 10], [10, 5]];
+  const union = mergeAdjacentPolygons(left, right);
+  check('focused/parcel-union', sharedBoundaryLength(left, right) === 10, 'split shared boundary measured incorrectly');
+  check('focused/parcel-union', !!union && signedArea(union) > 0 && isSimple(union), 'adjacent union is not a positive simple polygon');
+  check('focused/parcel-union', !!union && Math.abs(area(union) - area(left) - area(right)) < 1e-9, 'adjacent union changed parcel area');
+  check('focused/parcel-union', mergeAdjacentPolygons(left, [[10, 10], [12, 10], [12, 12], [10, 12]]) === null,
+    'point contact was treated as a shared parcel boundary');
+
+  const shortFrontage = [[0, 0], [10, 0], [10, 4], [0, 4]];
+  const landlocked = [[10, 0], [20, 0], [20, 10], [10, 10]];
+  const longFrontage = [[10, 10], [20, 10], [20, 20], [10, 20]];
+  const frontageFor = poly => poly.some(([, z]) => z === 20) ? { edge: 'long' }
+    : poly.some(([x]) => x === 0) ? { edge: 'short' } : null;
+  const result = mergeLandlockedParcels([shortFrontage, landlocked, longFrontage], frontageFor);
+  check('focused/parcel-choice', result.merged === 1 && result.parcels.length === 2, 'landlocked parcel was not consumed exactly once');
+  const joined = result.parcels.find(p => area(p.polygon) > 100);
+  check('focused/parcel-choice', !!joined && area(joined.polygon) === 200 && joined.frontage?.edge === 'long',
+    'landlocked parcel did not choose its longest shared boundary');
+
+  const fallback = mergeLandlockedParcels([left, right], () => null);
+  check('focused/parcel-fallback', fallback.merged === 0 && fallback.parcels.length === 2,
+    'frontage-free component collapsed instead of retaining courtyard fallback');
+
+  const frontage = poly => poly.some(([, z]) => z === 0) ? { edge: 'front' } : null;
+  const lShape = [
+    [[0, 0], [30, 0], [30, 10], [0, 10]],
+    [[0, 10], [10, 10], [10, 30], [0, 30]],
+  ];
+  const lResult = mergeLandlockedParcels(lShape, frontage);
+  const lParcel = lResult.parcels[0];
+  const lRect = lParcel && fitRect(lParcel.polygon, 0, 0);
+  check('focused/l-merge-fit', lResult.merged === 1 && lResult.parcels.length === 1 && lParcel.frontage,
+    'L-shaped frontage parcel was not merged with its landlocked leg');
+  check('focused/l-merge-fit', !!lRect && lRect.w >= 5.5 && lRect.d >= 5.5
+    && ringContainedByParcel(orientedRect(lRect.cx, lRect.cz, lRect.w, lRect.d, lRect.angle), lParcel.polygon),
+  'L-shaped merged parcel lost a contained regular fit');
+
+  const uShape = [
+    [[0, 0], [30, 0], [30, 10], [0, 10]],
+    [[0, 10], [10, 10], [10, 30], [0, 30]],
+    [[20, 10], [30, 10], [30, 30], [20, 30]],
+  ];
+  const uResult = mergeLandlockedParcels(uShape, frontage);
+  const uParcel = uResult.parcels[0];
+  const uRect = uParcel && fitRect(uParcel.polygon, 0, 0);
+  check('focused/u-merge-fit', uResult.merged === 2 && uResult.parcels.length === 1 && uParcel.frontage,
+    'U-shaped frontage parcel did not consume both landlocked legs');
+  check('focused/u-merge-fit', !!uRect && uRect.w >= 5.5 && uRect.d >= 5.5
+    && ringContainedByParcel(orientedRect(uRect.cx, uRect.cz, uRect.w, uRect.d, uRect.angle), uParcel.polygon),
+  'U-shaped merged parcel lost a contained regular fit');
+}
+
+checkParcelMerge();
+
+function ringContainedByParcel(ring, parcel, tol = 1e-6) {
+  if (!ring.every(([x, z]) => pointInPolygon(x, z, parcel) || distToBoundary(x, z, parcel) <= tol)) return false;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    for (let j = 0; j < parcel.length; j++) {
+      const p = parcel[j], q = parcel[(j + 1) % parcel.length];
+      if (segmentsTouch(a[0], a[1], b[0], b[1], p[0], p[1], q[0], q[1])) return false;
+    }
+  }
+  return true;
+}
+
+// A corner-only fit accepts this C-shaped parcel's 36×36 box even though its
+// right edge crosses the open middle notch. The fixed fit must retain a usable
+// candidate while rejecting that spanning rectangle.
+{
+  const parcel = [[0, 0], [40, 0], [40, 14], [28, 14], [28, 26], [40, 26], [40, 40], [0, 40]];
+  const rect = fitRect(parcel, 0, 0);
+  check('focused/fit-rect-concave', !!rect, 'concave parcel lost every usable rectangle');
+  check('focused/fit-rect-concave', !rect || ringContainedByParcel(orientedRect(rect.cx, rect.cz, rect.w, rect.d, rect.angle), parcel),
+    'rectangle still spans the C-shaped parcel notch');
+}
+
 function shorelineNearest(x, z, shores) {
   let best = { d: Infinity, angle: 0 };
   for (const shore of shores) {
@@ -191,6 +272,23 @@ function checkFootprints(seed, m, requireCourtyard = false) {
       check(seed, Number.isFinite(b[key]), `footprint building ${bi} lost rectangle field ${key}`);
     }
     check(seed, !m.reserved.some(r => polyIntersectsRect(b.footprint, r)), `footprint building ${bi} intersects reserved corridor`);
+  }
+  for (const [bi, b] of m.buildings.entries()) {
+    if (b.footprint) continue;
+    const ring = orientedRect(b.cx, b.cz, b.w, b.d, b.angle || 0);
+    const x0 = Math.min(...ring.map(([x]) => x)), x1 = Math.max(...ring.map(([x]) => x));
+    const z0 = Math.min(...ring.map(([, z]) => z)), z1 = Math.max(...ring.map(([, z]) => z));
+    const owner = m.parcels.find(p => p.x <= x0 + 1e-6 && p.x + p.w >= x1 - 1e-6
+      && p.z <= z0 + 1e-6 && p.z + p.d >= z1 - 1e-6
+      && ringContainedByParcel(ring, p.polygon));
+    check(seed, !!owner, `regular building ${bi} footprint is not contained by an owning parcel`);
+  }
+  for (const p of m.parcels) {
+    if (!p.frontage) continue;
+    check(seed, p.built || p.vacant || p.fallback === 'courtyard', 'frontage parcel was silently lost');
+    if (p.fallback === 'courtyard') check(seed,
+      m.parks.some(k => k.court && k.fallback === 'courtyard' && k.polygon === p.polygon),
+      'frontage parcel courtyard fallback was not emitted');
   }
   return footprints;
 }
@@ -558,6 +656,7 @@ for (let i = 0; i < N; i++) {
     const perBlock = new Map();
     for (const p of m.parcels) {
       const B = p.block.buildable;
+      check(seed, signedArea(p.polygon) > 0 && isSimple(p.polygon) && area(p.polygon) > 0, 'parcel polygon is not positive and simple');
       for (const [x, z] of p.polygon) {
         check(seed, pointInPolygon(x, z, B) || distToBoundary(x, z, B) < 1e-3, `parcel vertex outside block`);
       }
@@ -608,6 +707,7 @@ for (let i = 0; i < N; i++) {
   {
     const ser = mm => JSON.stringify({
       n: mm.graph.nodes, e: mm.graph.edges.map(e => [e.a, e.b, e.cls, e.removed]),
+      p: mm.parcels.map(p => [p.polygon, p.frontage, p.landlocked]),
       b: mm.buildings.map(b => [b.cx, b.cz, b.w, b.d, b.h, b.angle, b.footprint, b.courtyard]),
       w: mm.walkshed, wb: mm.blocks.map(b => b.walkshed),
       tv: trafficSignature(mm),
@@ -675,6 +775,8 @@ for (const life of ['low', 'high']) {
 }
 
 const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';
+if (N >= 100) check('summary', totals.landlocked / Math.max(1, totals.parcels) < .03,
+  `landlocked parcel rate ${pct(totals.landlocked, totals.parcels)} is not materially below the 4.7% baseline`);
 console.log(`cities: ${N}  avg ${(totals.ms / N).toFixed(0)}ms`);
 console.log(`faces ${totals.faces}  blocks ${totals.blocks}  offset drops ${pct(totals.offsetDrops, totals.blocks)}  degenerate faces ${totals.degenerate}`);
 const cl = totals.corridorLen.sort((a, b) => a - b);
