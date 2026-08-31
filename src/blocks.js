@@ -6,7 +6,7 @@
 // Parcels without frontage are landlocked and become courtyards.
 
 import {
-  area, obb, clipHalfPlaneMulti, offsetPolygon, shrinkPolygon, pointSegDist, distToBoundary,
+  area, obb, clipHalfPlaneMulti, offsetPolygon, shrinkPolygonMulti, pointSegDist, distToBoundary,
   pointInPolygon, orientedRect, centroid, segmentsTouch, mergeAdjacentPolygons, sharedBoundaryLength,
 } from './geom.js';
 
@@ -19,7 +19,7 @@ export const SETBACK = {
   mixed:       { arterial: 5, collector: 3.5, local: 3, boundary: 1, shore: 4, bridge: 6 },
 };
 
-export function buildableArea(face, g, zone, detail) {
+export function buildableAreas(face, g, zone, detail) {
   const dists = face.edges.map(eid => {
     const e = g.edges[eid];
     const sb = (SETBACK[zone] || SETBACK.mixed)[e.bridge ? 'bridge' : e.cls] ?? 3;
@@ -29,13 +29,20 @@ export function buildableArea(face, g, zone, detail) {
   // Miter offset first (cheap, exact for the common convex block); when a
   // short edge collapses under the inset the miter self-intersects, so fall
   // back to the stepped shrink that handles edge events.
-  let poly = offsetPolygon(face.polygon, dists);
-  if (!poly) poly = shrinkPolygon(face.polygon, dists);
-  if (!poly) {
+  const poly = offsetPolygon(face.polygon, dists);
+  if (poly) return [poly];
+  let pieces = shrinkPolygonMulti(face.polygon, dists);
+  if (!pieces.length) {
     const avg = dists.reduce((s, d) => s + d, 0) / dists.length * .85;
-    poly = shrinkPolygon(face.polygon, dists.map(() => avg));
+    pieces = shrinkPolygonMulti(face.polygon, dists.map(() => avg));
   }
-  return poly;
+  return pieces;
+}
+
+// Preserve the established single-ring API for callers that cannot represent
+// split events. The graph fabric uses buildableAreas to retain every piece.
+export function buildableArea(face, g, zone, detail) {
+  return buildableAreas(face, g, zone, detail)[0] || null;
 }
 
 // Recursive OBB split. Returns { parcels, slivers }.

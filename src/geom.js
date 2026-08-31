@@ -445,9 +445,23 @@ export function offsetPolygon(poly, dists, miterLimit = 3) {
 // Inward offset that survives edge events: the polygon is shrunk in small
 // steps and any edge that collapses (length → 0 or direction flips) is
 // removed before the next step, which is exactly what a straight skeleton
-// does for edge events, discretized. Split events (a polygon pinching into
-// two) still fail the final simple-polygon check and return null.
+// does for edge events, discretized. The single-ring entry point deliberately
+// retains its old contract; shrinkPolygonMulti additionally polygonizes the
+// bounded split-event case where the final wavefront pinches into components.
 export function shrinkPolygon(poly, dists, step = 1.5) {
+  const clean = shrinkWavefront(poly, dists, step);
+  if (!clean || signedArea(clean) <= 0 || !isSimple(clean)) return null;
+  return clean;
+}
+
+export function shrinkPolygonMulti(poly, dists, step = 1.5) {
+  const wavefront = shrinkWavefront(poly, dists, step);
+  if (!wavefront) return [];
+  if (signedArea(wavefront) > 0 && isSimple(wavefront)) return [wavefront];
+  return polygonizeSplitWavefront(wavefront, poly, dists);
+}
+
+function shrinkWavefront(poly, dists, step) {
   const n0 = poly.length;
   if (n0 < 3) return null;
   // Each edge: origin point on the (moving) line, unit direction, inward normal, remaining distance.
@@ -488,8 +502,79 @@ export function shrinkPolygon(poly, dists, step = 1.5) {
   const out = [];
   for (let i = 0; i < E.length; i++) out.push(vertex(E[(i - 1 + E.length) % E.length], E[i]));
   const clean = dedupe(out);
-  if (clean.length < 3 || signedArea(clean) <= 0 || !isSimple(clean)) return null;
+  if (clean.length < 3) return null;
   return clean;
+}
+
+// A split event leaves the discretized wavefront as a self-crossing walk.
+// Recursively cut that walk at proper segment intersections, then retain the
+// positive simple lobes that remain inside the source face. This is purposely
+// bounded to split events; holes and general polygon booleans stay out of the
+// offset contract.
+function polygonizeSplitWavefront(wavefront, source, dists) {
+  const pending = [wavefront], out = [];
+  let guard = 0;
+  while (pending.length && guard++ < 64) {
+    const ring = dedupe(pending.pop());
+    if (ring.length < 3) continue;
+    const hit = firstSelfIntersection(ring);
+    if (hit) {
+      const a = [hit.point];
+      for (let k = hit.i + 1; k <= hit.j; k++) a.push(ring[k]);
+      const b = [hit.point];
+      for (let k = hit.j + 1; k < ring.length; k++) b.push(ring[k]);
+      for (let k = 0; k <= hit.i; k++) b.push(ring[k]);
+      pending.push(dedupe(a), dedupe(b));
+      continue;
+    }
+    let clean = simplifyRing(ring, 1e-6);
+    if (clean.length < 3 || area(clean) <= EPS || !isSimple(clean)) continue;
+    if (signedArea(clean) < 0) clean = clean.reverse();
+    if (!ringInsideSource(clean, source) || !ringClearsSourceEdges(clean, source, dists)) continue;
+    out.push(clean);
+  }
+  return out.sort((a, b) => area(b) - area(a));
+}
+
+function ringClearsSourceEdges(ring, source, dists, tol = .35) {
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    const samples = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2));
+    for (let k = 0; k <= samples; k++) {
+      const t = k / samples, x = a[0] + (b[0] - a[0]) * t, z = a[1] + (b[1] - a[1]) * t;
+      for (let j = 0; j < source.length; j++) {
+        const p = source[j], q = source[(j + 1) % source.length];
+        if (pointSegDist(x, z, p[0], p[1], q[0], q[1]).d < dists[j] - tol) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function firstSelfIntersection(poly) {
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i], b = poly[(i + 1) % n];
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue;
+      const c = poly[j], d = poly[(j + 1) % n];
+      const hit = segIntersect(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1], 1e-8);
+      if (!hit) continue;
+      const endpointOnly = (hit.t <= 1e-8 || hit.t >= 1 - 1e-8) && (hit.u <= 1e-8 || hit.u >= 1 - 1e-8);
+      if (!endpointOnly) return { i, j, point: [hit.x, hit.z] };
+    }
+  }
+  return null;
+}
+
+function ringInsideSource(ring, source, tol = 1e-5) {
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    for (const p of [a, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]]) {
+      if (!pointInPolygon(p[0], p[1], source) && distToBoundary(p[0], p[1], source) > tol) return false;
+    }
+  }
+  return true;
 }
 
 export function polyIntersectsRect(poly, r) {

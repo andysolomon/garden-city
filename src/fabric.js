@@ -9,7 +9,7 @@
 import { CITY_SIZE, DENSITY, pickZone, massBuilding } from './common.js';
 import { makeWater, makePopulation, makeDirection, makeExclusion, makeNoise, makeElevation } from './fields.js';
 import { growRoads, extractFaces, VIRTUAL } from './graph.js';
-import { buildableArea, subdivideParcels, findFrontage, mergeLandlockedParcels, fitRect } from './blocks.js';
+import { buildableAreas, subdivideParcels, findFrontage, mergeLandlockedParcels, fitRect } from './blocks.js';
 import { resolvePreset } from './presets.js';
 import { buildCorridors } from './corridors.js';
 import {
@@ -127,14 +127,15 @@ export function graphFabric(model, land, rng, config) {
   }
   for (const b of blocksRaw) {
     if (b.field) continue;
-    b.buildable = buildableArea(b.face, g, b.zone, config.detail);
-    if (b.buildable && !footprintOnLand(b.buildable)) b.buildable = null;
-    if (!b.buildable) model.stats.offsetDrops++;
+    const pieces = buildableAreas(b.face, g, b.zone, config.detail).filter(piece => footprintOnLand(piece));
+    b.buildable = pieces[0] || null;
+    if (pieces.length > 1) b.buildablePieces = pieces;
+    if (!pieces.length) model.stats.offsetDrops++;
   }
 
   // Landmark: a central, generous, unreserved block.
   {
-    const free = blocksRaw.filter(b => b.buildable && !model.reserved.some(r => polyIntersectsRect(b.buildable, r)));
+    const free = blocksRaw.filter(b => b.buildable && !model.reserved.some(r => buildablePieces(b).some(poly => polyIntersectsRect(poly, r))));
     const dim = b => { const o = obb(b.buildable); return Math.min(o.w, o.d); };
     let cands = free.filter(b => b.pop > .6 && dim(b) > 50);
     if (!cands.length) cands = free.filter(b => b.pop > .35 && dim(b) > 40);
@@ -163,7 +164,7 @@ export function graphFabric(model, land, rng, config) {
 
   function makePlaza(b) {
     const poly = b.buildable;
-    model.plazas.push({ polygon: poly, ...bbox(poly) });
+    for (const piece of buildablePieces(b)) model.plazas.push({ polygon: piece, ...bbox(piece) });
     const o = obb(poly);
     const size = Math.min(o.w, o.d) * .42;
     model.landmarks.push({ x: o.cx, z: o.cz, w: size, d: size, h: config.density === 'extreme' ? 210 : 145, angle: o.angle });
@@ -178,15 +179,20 @@ export function graphFabric(model, land, rng, config) {
   }
 
   function addPark(b) {
-    const poly = b.buildable;
-    model.parks.push({ polygon: poly, ...bbox(poly) });
-    scatterTrees(poly, Math.max(4, Math.floor(b.area / 2600)), rng, model, [.7, 1.35]);
+    const pieces = buildablePieces(b), total = pieces.reduce((sum, piece) => sum + area(piece), 0);
+    for (const poly of pieces) {
+      model.parks.push({ polygon: poly, ...bbox(poly) });
+      const count = pieces.length === 1 ? Math.max(4, Math.floor(b.area / 2600))
+        : Math.max(2, Math.floor(b.area / 2600 * area(poly) / total));
+      scatterTrees(poly, count, rng, model, [.7, 1.35]);
+    }
   }
 
   // Euro blocks are a single polygonal building around a courtyard. Blocks
   // crossed by reserved infrastructure, too small for a useful court, or
   // rejected by the robust inset fall back to the ordinary parcel grammar.
   function makePerimeter(b) {
+    if (b.buildablePieces) return false;
     const outer = b.buildable;
     if (model.reserved.some(r => polyIntersectsRect(outer, r))) return false;
     if (!footprintOnLand(outer)) return false;
@@ -239,30 +245,32 @@ export function graphFabric(model, land, rng, config) {
 
   function parcelize(b) {
     const target = targetParcelBase * (1.5 - .9 * b.pop);
-    const { parcels, slivers } = subdivideParcels(b.buildable, { targetArea: target, minWidth: 9, rng });
-    model.stats.slivers += slivers;
-    const frontageFor = poly => findFrontage(poly, b.buildable, b.face, g);
-    const merged = mergeLandlockedParcels(parcels, frontageFor);
-    for (const { polygon: poly, frontage: fr } of merged.parcels) {
-      const parcel = { polygon: poly, zone: b.zone, dist: b.dist, pop: b.pop, frontage: fr, landlocked: !fr, block: b, ...bbox(poly) };
-      model.parcels.push(parcel);
-      if (!fr) { model.stats.landlocked++; model.parks.push({ polygon: poly, court: true, ...bbox(poly) }); continue; }
-      // Reserved corridors take their right-of-way out of the lot.
-      let usable = poly;
-      for (const r of model.reserved) { usable = trimPolyAgainstRect(usable, r); if (!usable) break; }
-      if (!usable) { courtyardFallback(parcel); continue; }
-      const rect = fitRect(usable, fr.angle, 0);
-      if (!rect || rect.w < 5.5 || rect.d < 5.5) { courtyardFallback(parcel); continue; }
-      if (rng.bool(config.density === 'low' ? .12 : .045)) {
-        parcel.vacant = true;
-        vacants.push({ ...rect, dist: b.dist });
-        continue;
+    for (const buildable of buildablePieces(b)) {
+      const { parcels, slivers } = subdivideParcels(buildable, { targetArea: target, minWidth: 9, rng });
+      model.stats.slivers += slivers;
+      const frontageFor = poly => findFrontage(poly, buildable, b.face, g);
+      const merged = mergeLandlockedParcels(parcels, frontageFor);
+      for (const { polygon: poly, frontage: fr } of merged.parcels) {
+        const parcel = { polygon: poly, zone: b.zone, dist: b.dist, pop: b.pop, frontage: fr, landlocked: !fr, block: b, ...bbox(poly) };
+        model.parcels.push(parcel);
+        if (!fr) { model.stats.landlocked++; model.parks.push({ polygon: poly, court: true, ...bbox(poly) }); continue; }
+        // Reserved corridors take their right-of-way out of the lot.
+        let usable = poly;
+        for (const r of model.reserved) { usable = trimPolyAgainstRect(usable, r); if (!usable) break; }
+        if (!usable) { courtyardFallback(parcel); continue; }
+        const rect = fitRect(usable, fr.angle, 0);
+        if (!rect || rect.w < 5.5 || rect.d < 5.5) { courtyardFallback(parcel); continue; }
+        if (rng.bool(config.density === 'low' ? .12 : .045)) {
+          parcel.vacant = true;
+          vacants.push({ ...rect, dist: b.dist });
+          continue;
+        }
+        const bs = massBuilding({ ...rect, zone: b.zone, dist: b.dist }, config, dcfg, rng)
+          .filter(bl => footprintOnLand(orientedRect(bl.cx, bl.cz, bl.w, bl.d, bl.angle || 0)));
+        if (!bs.length) { courtyardFallback(parcel); continue; }
+        for (const bl of bs) model.buildings.push(bl);
+        parcel.built = true;
       }
-      const bs = massBuilding({ ...rect, zone: b.zone, dist: b.dist }, config, dcfg, rng)
-        .filter(bl => footprintOnLand(orientedRect(bl.cx, bl.cz, bl.w, bl.d, bl.angle || 0)));
-      if (!bs.length) { courtyardFallback(parcel); continue; }
-      for (const bl of bs) model.buildings.push(bl);
-      parcel.built = true;
     }
   }
 
@@ -287,6 +295,10 @@ export function graphFabric(model, land, rng, config) {
       }
     }
     return true;
+  }
+
+  function buildablePieces(block) {
+    return block.buildablePieces || (block.buildable ? [block.buildable] : []);
   }
 }
 

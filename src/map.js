@@ -103,7 +103,7 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
   }
   if (on('blocks')) {
     ctx.strokeStyle = '#8aa07a'; ctx.lineWidth = 1;
-    for (const b of model.blocks) if (b.buildable) { path(b.buildable); ctx.stroke(); }
+    for (const b of model.blocks) for (const poly of b.buildablePieces || (b.buildable ? [b.buildable] : [])) { path(poly); ctx.stroke(); }
     ctx.fillStyle = 'rgba(138,160,122,.35)';
     for (const p of model.parks) { path(p.polygon); ctx.fill(); }
     for (const p of model.plazas) { ctx.fillStyle = 'rgba(232,80,30,.25)'; path(p.polygon); ctx.fill(); }
