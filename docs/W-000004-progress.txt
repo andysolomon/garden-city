@@ -1,0 +1,19 @@
+W-000004 - Build a Road Graph from Real Road Centerlines - Progress
+Generated: 2026-09-01 14:11:11 EDT
+Status: Implementation complete and verified; scoped changes left uncommitted for parent inspection.
+
+[x] 1.0 - Phase 1 - RoadGraph metadata compatibility
+    [x] 1.1 - Preserve optional source/level metadata across graph operations
+    [x] 1.2 - Exclude explicitly grade-separated imported edges from planar face walking
+[x] 2.0 - Phase 2 - Imported road topology
+    [x] 2.1 - Normalize line parts, source metadata, classes, widths, and levels
+    [x] 2.2 - Quantize and split same-level intersections into shared nodes
+    [x] 2.3 - Keep bridge/tunnel/other-level crossings topologically separate
+    [x] 2.4 - Report unusable, duplicate, and disconnected source geometry
+[x] 3.0 - Phase 3 - Routing, faces, map, and regression
+    [x] 3.1 - Add test/roadgraph-import.mjs fixtures
+    [x] 3.2 - Verify routing, face extraction, and debug-map compatibility
+    [x] 3.3 - Run node test/roadgraph-import.mjs and npm test
+[ ] 4.0 - Ship & archive (intentionally deferred to parent; this task prohibits commits/PR mutation)
+    [ ] 4.1 - Open a scoped PR that closes #39
+    [ ] 4.2 - On merge: archive docs/W-000004-IMPLEMENTATION_PLAN.md + docs/W-000004-progress.txt
