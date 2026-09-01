@@ -12,6 +12,10 @@ import {
   clipPolyline,
 } from '../src/geography.js';
 import { normalizeGeoJSON, SUPPORTED_GEOMETRY_TYPES } from '../src/geojson.js';
+import { makeImportedWater, makeWater } from '../src/fields.js';
+import { graphFabric } from '../src/fabric.js';
+import { RNG } from '../src/rng.js';
+import { centroid, orientedRect, pointInPolygon } from '../src/geom.js';
 
 const DEG_TO_RAD = Math.PI / 180;
 const metresPerDegree = EARTH_RADIUS_M * DEG_TO_RAD;
@@ -665,6 +669,313 @@ assert.match(
   geometryTypeSiblingRecovery.diagnostics[0].message,
   /geometry type \[unformattable value\] is not one of LineString, MultiLineString, Polygon, MultiPolygon/,
 );
+
+// --- Imported water boundary -----------------------------------------------
+
+const closedRect = (x0, z0, x1, z1) => [[x0, z0], [x1, z0], [x1, z1], [x0, z1], [x0, z0]];
+const polygonWaterRecord = polygons => ({
+  index: 0, sourceId: null, properties: {}, geometry: { type: 'polygon', polygons },
+});
+
+const lakeRecords = [
+  { index: 0, geometry: { type: 'line', parts: [[[0, 0], [1, 1]]] } },
+  polygonWaterRecord([[closedRect(-20, -10, 20, 10)]]),
+];
+const lakeSnapshot = JSON.stringify(lakeRecords);
+const lake = makeImportedWater(lakeRecords, 100);
+assert.equal(lake.kind, 'imported');
+assert.deepEqual(lake.polygons, [[closedRect(-20, -10, 20, 10)]]);
+assert.notEqual(lake.polygons[0][0], lakeRecords[1].geometry.polygons[0][0]);
+assert.equal(JSON.stringify(lakeRecords), lakeSnapshot, 'imported water mutated normalized records');
+assert.equal(lake.isLand(0, 0), false);
+assert.equal(lake.isLand(30, 0), true);
+assert.equal(lake.sdf(0, 0), -10);
+assert.equal(lake.sdf(30, 0), 10);
+assert.equal(lake.sdf(20, 0), 0);
+assert.deepEqual(lake.shores, [{ pts: [[-20, -10], [20, -10], [20, 10], [-20, 10]], closed: true }]);
+
+const holeRing = closedRect(-5, -5, 5, 5);
+const holed = makeWater({ kind: 'imported', records: [
+  polygonWaterRecord([[closedRect(-20, -20, 20, 20), holeRing]]),
+] }, 100);
+assert.equal(holed.isLand(0, 0), true, 'a polygon hole must remain land');
+assert.equal(holed.isLand(10, 0), false);
+assert.equal(holed.sdf(0, 0), 5);
+assert.equal(holed.sdf(10, 0), -5);
+assert.equal(holed.sdf(5, 0), 0);
+assert.equal(holed.shores.length, 2);
+assert.ok(holed.shores.every(shore => shore.closed));
+
+const overlapping = makeImportedWater([
+  polygonWaterRecord([
+    [closedRect(-20, -10, 5, 10)],
+    [closedRect(0, -10, 20, 10)],
+  ]),
+], 100);
+assert.equal(overlapping.isLand(-10, 0), false);
+assert.equal(overlapping.isLand(10, 0), false);
+assert.equal(overlapping.isLand(30, 0), true);
+assert.equal(overlapping.sdf(5, 0), -10, 'a hidden overlap edge is not union shoreline');
+assert.equal(overlapping.sdf(30, 0), 10);
+
+const multiPolygonRings = [
+  [closedRect(-40, -10, -30, 10)],
+  [closedRect(30, -10, 40, 10)],
+];
+const multiPolygonWater = makeImportedWater([polygonWaterRecord(multiPolygonRings)], 100);
+assert.deepEqual(multiPolygonWater.polygons, multiPolygonRings);
+assert.notEqual(multiPolygonWater.polygons[0][0], multiPolygonRings[0][0]);
+assert.equal(multiPolygonWater.polygons.length, 2);
+assert.equal(multiPolygonWater.isLand(-35, 0), false);
+assert.equal(multiPolygonWater.isLand(35, 0), false);
+assert.equal(multiPolygonWater.isLand(0, 0), true);
+assert.equal(multiPolygonWater.shores.length, 2);
+
+const crossing = makeImportedWater([
+  polygonWaterRecord([[closedRect(-80, -20, 80, 20)]]),
+], 100);
+assert.deepEqual(crossing.shores, [
+  { pts: [[-50, -20], [50, -20]], closed: false },
+  { pts: [[50, 20], [-50, 20]], closed: false },
+]);
+for (const shore of crossing.shores) for (const point of shore.pts) {
+  assert.ok(point[0] >= -50 && point[0] <= 50 && point[1] >= -50 && point[1] <= 50);
+}
+assert.deepEqual(makeImportedWater([
+  polygonWaterRecord([[closedRect(60, 60, 80, 80)]]),
+], 100).shores, []);
+const emptyImported = makeImportedWater([], 100);
+assert.deepEqual(emptyImported.polygons, []);
+assert.deepEqual(emptyImported.shores, []);
+assert.equal(emptyImported.isLand(0, 0), true);
+assert.equal(emptyImported.sdf(0, 0), 1e9);
+assert.equal(
+  JSON.stringify(crossing),
+  JSON.stringify(makeImportedWater([polygonWaterRecord([[closedRect(-80, -20, 80, 20)]])], 100)),
+  'imported boundaries must serialize deterministically',
+);
+assert.throws(() => makeImportedWater(null, 100), TypeError);
+assert.throws(() => makeImportedWater([polygonWaterRecord([[[[0, 0], [1, 0], [NaN, 1], [0, 0]]]])], 100), TypeError);
+assert.throws(
+  () => makeImportedWater([polygonWaterRecord([[[ [0, 0], [0, 0], [0, 0], [0, 0] ]]])], 100),
+  TypeError,
+);
+assert.throws(
+  () => makeImportedWater([polygonWaterRecord([[[ [0, 0], [10, 0], [20, 0], [0, 0] ]]])], 100),
+  /non-zero area/,
+);
+
+// Existing procedural samples retain their contract when the imported branch
+// is unused.
+assert.equal(makeWater({ kind: 'flat' }, 100).sdf(0, 0), 1e9);
+assert.ok(makeWater({ kind: 'river', x0: -10, x1: 10 }, 100).sdf(0, 0) < 0);
+assert.ok(makeWater({ kind: 'coast', edge: 0 }, 100).sdf(-10, 0) < 0);
+assert.ok(makeWater({ kind: 'island', rx: 20, rz: 10 }, 100).sdf(0, 0) > 0);
+
+// Exercise the real graph/fabric boundary with a bounded imported mask. The
+// eastern water polygon crosses the viewport; roads may bridge it, while all
+// other road axes and retained buildable geometry must sample on land.
+const importedLand = { kind: 'imported', records: [
+  polygonWaterRecord([[closedRect(120, -600, 600, 600)]]),
+] };
+const importedModel = {
+  roads: [], roadCaps: [], bridges: [], blocks: [], parcels: [], buildings: [],
+  parks: [], plazas: [], trees: [], cars: [], drones: [], cranes: [], rail: null,
+  landmarks: [], water: [], reserved: [],
+};
+graphFabric(importedModel, importedLand, new RNG('geography/imported-fabric'), {
+  seed: 'geography/imported-fabric', density: 'low', pattern: 'manhattan',
+  sector: 'mixed', detail: 'low', massing: 'modern',
+});
+const importedMask = importedModel.fields.water;
+function sampleBoundaryOnLand(poly, clearance, label) {
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const count = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 3));
+    for (let k = 0; k <= count; k++) {
+      const t = k / count;
+      assert.ok(importedMask.sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) >= clearance,
+        `${label} sampled inside imported water`);
+    }
+  }
+}
+for (const [index, road] of importedModel.roads.entries()) {
+  const count = Math.max(1, Math.ceil(road.len / 3));
+  for (let k = 0; k <= count; k++) {
+    const t = k / count;
+    assert.ok(importedMask.sdf(road.a[0] + (road.b[0] - road.a[0]) * t,
+      road.a[1] + (road.b[1] - road.a[1]) * t) >= -0.25, `road ${index} enters imported water`);
+  }
+}
+for (const [label, entries, clearance] of [
+  ['block', importedModel.blocks.flatMap(block => (block.buildablePieces || (block.buildable ? [block.buildable] : []))
+    .map(polygon => ({ polygon }))), 0.5],
+  ['parcel', importedModel.parcels, 0.5],
+  ['building', importedModel.buildings.map(building => ({ polygon: building.footprint })), 0.5],
+]) for (const [index, entry] of entries.entries()) {
+  if (entry.polygon) sampleBoundaryOnLand(entry.polygon, clearance, `${label} ${index}`);
+}
+assert.ok(importedModel.roads.length > 0 && importedModel.blocks.length > 0 && importedModel.parcels.length > 0);
+
+// Closed imported lakes are disconnected graph components until a road reaches
+// them. A 30-point ring previously disappeared during face extraction, leaving
+// a land-centred block around water; a 500-point ring could instead become the
+// largest component and discard every procedural road. Keep graph-only shores
+// bounded and independently validate every accepted fabric polygon against the
+// authoritative (unsimplified) mask.
+function circularLake(vertexCount) {
+  const ring = [];
+  for (let i = 0; i < vertexCount; i++) {
+    const angle = i / vertexCount * Math.PI * 2;
+    ring.push([100 + Math.cos(angle) * 35, Math.sin(angle) * 35]);
+  }
+  return ring;
+}
+
+function assertClosedCircleShore(vertexCount) {
+  const ring = circularLake(vertexCount);
+  const records = [polygonWaterRecord([[ring.concat([ring[0].slice()])]])];
+  const first = makeImportedWater(records, 900);
+  const second = makeImportedWater(records, 900);
+  assert.equal(first.shores.length, 1, `${vertexCount}-point in-viewport circle must be one shore`);
+  assert.equal(first.shores[0].closed, true, `${vertexCount}-point in-viewport circle must stay closed`);
+  assert.ok(first.shores[0].pts.length >= 3 && first.shores[0].pts.length <= 24,
+    `${vertexCount}-point circle must respect the graph-only point bound`);
+  assert.notDeepEqual(first.shores[0].pts[0], first.shores[0].pts.at(-1),
+    `${vertexCount}-point closed shore must not repeat its first point`);
+  assert.equal(JSON.stringify(first.shores), JSON.stringify(second.shores),
+    `${vertexCount}-point circle shore must serialize deterministically`);
+}
+
+assertClosedCircleShore(30);
+assertClosedCircleShore(500);
+
+function lakeFabric(vertexCount) {
+  const ring = circularLake(vertexCount);
+  const model = {
+    roads: [], roadCaps: [], bridges: [], blocks: [], parcels: [], buildings: [],
+    parks: [], plazas: [], trees: [], cars: [], drones: [], cranes: [], rail: null,
+    landmarks: [], water: [], reserved: [],
+  };
+  graphFabric(model, { kind: 'imported', records: [
+    polygonWaterRecord([[ring.concat([ring[0].slice()])]]),
+  ] }, new RNG(`geography/closed-lake-${vertexCount}`), {
+    seed: `geography/closed-lake-${vertexCount}`, density: 'low', pattern: 'manhattan',
+    sector: 'mixed', detail: 'low', massing: 'modern',
+  });
+  return { model, ring };
+}
+
+function assertLakeFabricOnLand(vertexCount) {
+  const { model, ring } = lakeFabric(vertexCount);
+  const mask = model.fields.water;
+  assert.equal(mask.polygons[0][0].length, vertexCount + 1, 'authoritative lake ring was simplified');
+  assert.ok(mask.shores.length === 1 && mask.shores[0].pts.length <= 24,
+    'graph-only lake shore must have a deterministic point bound');
+  assert.ok(model.roads.length > 0, `${vertexCount}-vertex lake discarded procedural roads`);
+
+  const geometry = [
+    ...model.blocks.map(block => ['block', block.polygon, 0]),
+    ...model.blocks.flatMap(block => (block.buildablePieces || (block.buildable ? [block.buildable] : []))
+      .map(poly => ['buildable', poly, .5])),
+    ...model.parcels.map(parcel => ['parcel', parcel.polygon, .5]),
+    ...model.buildings.map(building => ['building', building.footprint
+      || orientedRect(building.cx, building.cz, building.w, building.d, building.angle || 0), .5]),
+  ];
+  for (const [index, [label, poly, clearance]] of geometry.entries()) {
+    const [cx, cz] = centroid(poly);
+    assert.ok(mask.isLand(cx, cz), `${vertexCount}-vertex lake ${label} ${index} centroid is water`);
+    assert.ok(!ring.some(point => pointInPolygon(point[0], point[1], poly)),
+      `${vertexCount}-vertex lake ${label} ${index} encloses imported water`);
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const count = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2));
+      for (let k = 0; k <= count; k++) {
+        const t = k / count;
+        assert.ok(mask.sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) >= clearance,
+          `${vertexCount}-vertex lake ${label} ${index} crosses imported water`);
+      }
+    }
+  }
+  assert.ok(model.blocks.length > 0 && model.parcels.length > 0 && model.buildings.length > 0,
+    `${vertexCount}-vertex lake did not exercise the complete fabric`);
+}
+
+assertLakeFabricOnLand(30);
+assertLakeFabricOnLand(500);
+
+function densifyClosed(ring, pointsPerEdge) {
+  const dense = [];
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    for (let k = 0; k < pointsPerEdge; k++) {
+      const t = k / pointsPerEdge;
+      dense.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+    }
+  }
+  return dense;
+}
+
+function assertShoreChordsAvoidLand(water, label) {
+  for (const [index, shore] of water.shores.entries()) {
+    const n = shore.pts.length;
+    const count = shore.closed ? n : n - 1;
+    assert.ok(count >= 1, `${label} shore ${index} is empty`);
+    for (let i = 0; i < count; i++) {
+      const a = shore.pts[i], b = shore.pts[(i + 1) % n];
+      const samples = Math.max(2, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2));
+      for (let k = 1; k < samples; k++) {
+        const t = k / samples;
+        assert.ok(water.sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) <= 0.5,
+          `${label} shore ${index} chord ${i} cuts land`);
+      }
+    }
+  }
+}
+
+// C-shaped lake: uniform 24-point decimation would chord the mouth through land.
+const concaveCore = [
+  [-80, -50], [80, -50], [80, 50], [25, 50], [25, -10], [-25, -10], [-25, 50], [-80, 50],
+];
+const concaveDense = densifyClosed(concaveCore, 40);
+const concaveWater = makeImportedWater([
+  polygonWaterRecord([[concaveDense.concat([concaveDense[0].slice()])]]),
+], 900);
+assert.ok(concaveWater.shores.length >= 1);
+assert.ok(concaveWater.shores.every(shore => shore.pts.length <= 24));
+assert.equal(concaveWater.isLand(0, 20), true, 'the C-mouth must remain land');
+assert.equal(concaveWater.isLand(0, -30), false);
+assertShoreChordsAvoidLand(concaveWater, 'concave C');
+
+const ribbonLand = { kind: 'imported', records: [
+  polygonWaterRecord([[closedRect(-350, -0.35, 350, 0.35)]]),
+] };
+const ribbonModel = {
+  roads: [], roadCaps: [], bridges: [], blocks: [], parcels: [], buildings: [],
+  parks: [], plazas: [], trees: [], cars: [], drones: [], cranes: [], rail: null,
+  landmarks: [], water: [], reserved: [],
+};
+graphFabric(ribbonModel, ribbonLand, new RNG('geography/thin-ribbon'), {
+  seed: 'geography/thin-ribbon', density: 'low', pattern: 'manhattan',
+  sector: 'mixed', detail: 'low', massing: 'modern',
+});
+assert.ok(ribbonModel.roads.length > 0 && ribbonModel.blocks.length > 0);
+for (const [index, block] of ribbonModel.blocks.entries()) {
+  assert.ok(ribbonModel.fields.water.isLand(block.cx, block.cz), `thin ribbon block ${index} centroid is water`);
+  assert.ok(!containsRing(block.polygon, ribbonLand.records[0].geometry.polygons[0][0]),
+    `thin ribbon block ${index} encloses the water ribbon`);
+}
+
+function containsRing(poly, ring) {
+  const count = ring.length > 1 && ring[0][0] === ring.at(-1)[0] && ring[0][1] === ring.at(-1)[1]
+    ? ring.length - 1 : ring.length;
+  for (let i = 0; i < count; i++) {
+    if (pointInPolygon(ring[i][0], ring[i][1], poly)) return true;
+    const q = ring[(i + 1) % count];
+    if (pointInPolygon((ring[i][0] + q[0]) / 2, (ring[i][1] + q[1]) / 2, poly)) return true;
+  }
+  return false;
+}
 
 console.log(JSON.stringify({
   tests: 'geography',

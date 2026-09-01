@@ -114,6 +114,11 @@ export function graphFabric(model, land, rng, config) {
   for (const f of fx.faces) {
     const [cx, cz] = centroid(f.polygon);
     if (!water.isLand(cx, cz)) continue;
+    // A disconnected imported lake ring may be absent from the retained face
+    // component. Its containing face still is not a land block, even when the
+    // face boundary and centroid happen to be on land. Simplified graph-shore
+    // chords also must not turn the water-side sliver into accepted geometry.
+    if (!importedFaceOnLand(f.polygon)) continue;
     if (f.area < 350) continue;
     const pop = population(cx, cz);
     const dist = 1 - pop;
@@ -251,6 +256,7 @@ export function graphFabric(model, land, rng, config) {
       const frontageFor = poly => findFrontage(poly, buildable, b.face, g);
       const merged = mergeLandlockedParcels(parcels, frontageFor);
       for (const { polygon: poly, frontage: fr } of merged.parcels) {
+        if (!footprintOnLand(poly)) continue;
         const parcel = { polygon: poly, zone: b.zone, dist: b.dist, pop: b.pop, frontage: fr, landlocked: !fr, block: b, ...bbox(poly) };
         model.parcels.push(parcel);
         if (!fr) { model.stats.landlocked++; model.parks.push({ polygon: poly, court: true, ...bbox(poly) }); continue; }
@@ -280,10 +286,11 @@ export function graphFabric(model, land, rng, config) {
   }
 
   // A face centroid can be on land while an inset edge still crosses a river
-  // or coast. Sample every buildable/building edge densely enough that the
-  // same signed-distance water field governs the whole footprint, not merely
-  // its centre or corners. Rejection leaves the graph and parcel grammar
-  // unchanged away from the shoreline.
+  // or coast. Sample every buildable/parcel/building edge densely enough that
+  // the same signed-distance water field governs the whole footprint, not
+  // merely its centre or corners. Imported polygons additionally receive exact
+  // ring-intersection and containment checks: dense boundary samples alone
+  // cannot detect a closed lake wholly enclosed by an otherwise-land polygon.
   function footprintOnLand(poly, clearance = .5, step = 4) {
     if (!poly?.length) return false;
     for (let i = 0; i < poly.length; i++) {
@@ -294,7 +301,60 @@ export function graphFabric(model, land, rng, config) {
         if (!(water.sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) > clearance)) return false;
       }
     }
+    if (water.kind !== 'imported') return true;
+    if (containsImportedWater(poly)) return false;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      for (const polygon of water.polygons) for (const ring of polygon) {
+        const count = ring.length > 1 && ring[0][0] === ring.at(-1)[0] && ring[0][1] === ring.at(-1)[1]
+          ? ring.length - 1 : ring.length;
+        for (let j = 0; j < count; j++) {
+          const p = ring[j], q = ring[(j + 1) % count];
+          if (segIntersect(a[0], a[1], b[0], b[1], p[0], p[1], q[0], q[1])) return false;
+        }
+      }
+    }
     return true;
+  }
+
+  function importedRingCount(ring) {
+    return ring.length > 1 && ring[0][0] === ring.at(-1)[0] && ring[0][1] === ring.at(-1)[1]
+      ? ring.length - 1 : ring.length;
+  }
+
+  function importedFaceOnLand(poly) {
+    if (water.kind !== 'imported') return true;
+    if (containsImportedWater(poly)) return false;
+    for (const point of poly) if (!water.isLand(point[0], point[1])) return false;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      for (const polygon of water.polygons) for (const ring of polygon) {
+        const count = importedRingCount(ring);
+        for (let j = 0; j < count; j++) {
+          const p = ring[j], q = ring[(j + 1) % count];
+          if (segIntersect(a[0], a[1], b[0], b[1], p[0], p[1], q[0], q[1])) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  function containsImportedWater(poly) {
+    if (water.kind !== 'imported') return false;
+    // Vertices or edge midpoints of an imported outer ring inside the candidate
+    // prove that candidate encloses water, including thin ribbons whose corners
+    // sit outside the face.
+    for (const polygon of water.polygons) {
+      const outer = polygon[0] || [];
+      const count = importedRingCount(outer);
+      for (let i = 0; i < count; i++) {
+        if (pointInPolygon(outer[i][0], outer[i][1], poly)) return true;
+        const q = outer[(i + 1) % count];
+        const mx = (outer[i][0] + q[0]) / 2, mz = (outer[i][1] + q[1]) / 2;
+        if (pointInPolygon(mx, mz, poly) && !water.isLand(mx, mz)) return true;
+      }
+    }
+    return false;
   }
 
   function buildablePieces(block) {

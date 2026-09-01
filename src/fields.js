@@ -9,7 +9,8 @@
 //   elevation(x, z)   → metres, bounded to a small city-scale land range
 
 import { hashSeed } from './rng.js';
-import { pointInPolygon, pointSegDist, angleDiff } from './geom.js';
+import { pointInPolygon, pointSegDist, angleDiff, signedArea } from './geom.js';
+import { clipSegment } from './geography.js';
 
 // ---------------------------------------------------------------------------
 // Seeded 2D value noise, smooth and cheap. Returns -1..1.
@@ -59,7 +60,274 @@ export function makeElevation(seed, size = 900) {
 // The same polylines are inserted into the road graph as `shore` edges, so
 // the geometry the growth sees and the geometry the faces see are identical.
 // ---------------------------------------------------------------------------
+function samePoint(a, b) {
+  return a[0] === b[0] && a[1] === b[1];
+}
+
+// Segment interpolation can reproduce a shared source vertex with a few ULPs
+// of error. Use tolerance only while assembling graph-facing shorelines; the
+// authoritative polygon and mask paths retain exact source coordinates.
+function sameShorePoint(a, b) {
+  const scale = Math.max(1, Math.abs(a[0]), Math.abs(a[1]), Math.abs(b[0]), Math.abs(b[1]));
+  const epsilon = Math.max(1e-9, Number.EPSILON * scale * 32);
+  return Math.abs(a[0] - b[0]) <= epsilon && Math.abs(a[1] - b[1]) <= epsilon;
+}
+
+// Face extraction retains the graph component with the most edges. Imported
+// rings are graph hints rather than the authoritative water geometry, so cap
+// their vertex count below a normal road fabric's size. Ordered decimation is
+// deterministic, retains open-piece endpoints, and never changes polygons or
+// the segments used by isLand/SDF.
+const MAX_IMPORTED_SHORE_POINTS = 24;
+
+function chordCutsLand(a, b, sdf) {
+  const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (!(length > 0)) return false;
+  const n = Math.max(2, Math.ceil(length / 2));
+  for (let k = 1; k < n; k++) {
+    const t = k / n;
+    if (sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) > 0.5) return true;
+  }
+  return false;
+}
+
+function indicesBetween(count, from, to, closed) {
+  const idx = [];
+  if (count < 1) return idx;
+  let i = closed ? (from + 1) % count : from + 1;
+  let steps = 0;
+  while (i !== to && i < count && steps++ <= count) {
+    idx.push(i);
+    i = closed ? (i + 1) % count : i + 1;
+  }
+  return idx;
+}
+
+function farthestFromChord(points, from, to, closed) {
+  const a = points[from], b = points[to];
+  let best = null, bestD = 0;
+  for (const i of indicesBetween(points.length, from, to, closed)) {
+    const d = pointSegDist(points[i][0], points[i][1], a[0], a[1], b[0], b[1]).d;
+    if (d > bestD + 1e-12 || (Math.abs(d - bestD) <= 1e-12 && (best === null || i < best))) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+// Uniform decimation can chord a concave bay through land. Repair by inserting
+// the farthest original vertex, then split rather than emit a land-cutting chord.
+function boundShorePieces(points, closed, sdf) {
+  if (points.length <= MAX_IMPORTED_SHORE_POINTS) return [{ pts: points, closed }];
+  const idxs = [];
+  for (let i = 0; i < MAX_IMPORTED_SHORE_POINTS; i++) {
+    const index = closed
+      ? Math.floor(i * points.length / MAX_IMPORTED_SHORE_POINTS)
+      : Math.round(i * (points.length - 1) / (MAX_IMPORTED_SHORE_POINTS - 1));
+    if (!idxs.length || idxs[idxs.length - 1] !== index) idxs.push(index);
+  }
+  let changed = true;
+  while (changed && idxs.length < MAX_IMPORTED_SHORE_POINTS) {
+    changed = false;
+    const pairs = closed ? idxs.length : idxs.length - 1;
+    for (let i = 0; i < pairs; i++) {
+      const aIdx = idxs[i], bIdx = idxs[(i + 1) % idxs.length];
+      if (!chordCutsLand(points[aIdx], points[bIdx], sdf)) continue;
+      const insert = farthestFromChord(points, aIdx, bIdx, closed);
+      if (insert === null || idxs.includes(insert)) continue;
+      idxs.splice(i + 1, 0, insert);
+      changed = true;
+      break;
+    }
+  }
+  const pieces = [];
+  let current = [points[idxs[0]]];
+  const pairs = closed ? idxs.length : idxs.length - 1;
+  let split = false;
+  for (let i = 0; i < pairs; i++) {
+    const aIdx = idxs[i], bIdx = idxs[(i + 1) % idxs.length];
+    const next = points[bIdx];
+    if (chordCutsLand(points[aIdx], next, sdf)) {
+      split = true;
+      if (current.length >= 2) pieces.push({ pts: current, closed: false });
+      current = [next];
+      continue;
+    }
+    if (!samePoint(current[current.length - 1], next)) current.push(next);
+  }
+  if (!split && closed && current.length > 2 && sameShorePoint(current[0], current[current.length - 1])) {
+    current.pop();
+    return [{ pts: current, closed: true }];
+  }
+  if (!split && closed) return [{ pts: current, closed: current.length > 2 }];
+  if (current.length >= 2) pieces.push({ pts: current, closed: false });
+  return pieces.filter(piece => piece.pts.length >= 2);
+}
+
+/**
+ * Convert normalized polygon records into the fields water boundary. Returned
+ * polygon coordinates are owned copies; clipping affects only `shores`.
+ */
+export function makeImportedWater(records, size = 900) {
+  if (!Array.isArray(records)) throw new TypeError('imported water records must be an array');
+  if (!Number.isFinite(size) || size <= 0) throw new RangeError('imported water size must be a positive finite number');
+
+  const polygons = [];
+  const rings = [];
+  for (const record of records) {
+    if (!record || record.geometry?.type !== 'polygon') continue;
+    if (!Array.isArray(record.geometry.polygons)) throw new TypeError('polygon geometry polygons must be an array');
+    for (const sourcePolygon of record.geometry.polygons) {
+      if (!Array.isArray(sourcePolygon) || sourcePolygon.length === 0) {
+        throw new TypeError('each polygon must contain at least one ring');
+      }
+      const polygon = sourcePolygon.map(sourceRing => {
+        if (!Array.isArray(sourceRing)) throw new TypeError('polygon rings must be arrays');
+        const copied = sourceRing.map(point => {
+          if (!Array.isArray(point) || point.length < 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+            throw new TypeError('polygon coordinates must be finite [x, z] points');
+          }
+          return [point[0], point[1]];
+        });
+        const sample = copied.length > 1 && samePoint(copied[0], copied[copied.length - 1])
+          ? copied.slice(0, -1) : copied.slice();
+        const unique = new Set(sample.map(point => `${point[0]},${point[1]}`));
+        if (unique.size < 3) throw new TypeError('polygon rings must contain at least three distinct sampling points');
+        if (Math.abs(signedArea(sample)) <= 1e-8) {
+          throw new TypeError('polygon rings must enclose a non-zero area');
+        }
+        rings.push(sample);
+        return copied;
+      });
+      polygons.push(polygon);
+    }
+  }
+
+  const waterAt = (x, z) => {
+    for (const polygon of polygons) {
+      const outer = polygon[0].length > 1 && samePoint(polygon[0][0], polygon[0][polygon[0].length - 1])
+        ? polygon[0].slice(0, -1) : polygon[0];
+      if (!pointInPolygon(x, z, outer)) continue;
+      let inHole = false;
+      for (let i = 1; i < polygon.length; i++) {
+        const ring = polygon[i].length > 1 && samePoint(polygon[i][0], polygon[i][polygon[i].length - 1])
+          ? polygon[i].slice(0, -1) : polygon[i];
+        if (pointInPolygon(x, z, ring)) { inHole = true; break; }
+      }
+      if (!inHole) return true;
+    }
+    return false;
+  };
+  const isLand = (x, z) => !waterAt(x, z);
+
+  // Split source edges wherever boundaries meet. An atomic edge is retained
+  // only when samples on its opposite sides differ in the union mask; hidden
+  // overlap edges therefore cannot become false zero-distance shorelines.
+  const sourceSegments = [];
+  for (let ringIndex = 0; ringIndex < rings.length; ringIndex++) {
+    const ring = rings[ringIndex];
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      if (!samePoint(a, b)) sourceSegments.push({ a, b, ringIndex, order: i, cuts: [0, 1] });
+    }
+  }
+  for (let i = 0; i < sourceSegments.length; i++) for (let j = i + 1; j < sourceSegments.length; j++) {
+    const first = sourceSegments[i], second = sourceSegments[j];
+    for (const endpoint of [second.a, second.b]) {
+      const nearest = pointSegDist(endpoint[0], endpoint[1], first.a[0], first.a[1], first.b[0], first.b[1]);
+      if (nearest.d <= 1e-9 && nearest.t > 0 && nearest.t < 1) first.cuts.push(nearest.t);
+    }
+    for (const endpoint of [first.a, first.b]) {
+      const nearest = pointSegDist(endpoint[0], endpoint[1], second.a[0], second.a[1], second.b[0], second.b[1]);
+      if (nearest.d <= 1e-9 && nearest.t > 0 && nearest.t < 1) second.cuts.push(nearest.t);
+    }
+    // Non-collinear crossings have no endpoint on the other segment.
+    const ax = first.a[0], az = first.a[1], arx = first.b[0] - ax, arz = first.b[1] - az;
+    const bx = second.a[0], bz = second.a[1], brx = second.b[0] - bx, brz = second.b[1] - bz;
+    const cross = arx * brz - arz * brx;
+    if (Math.abs(cross) > 1e-12) {
+      const t = ((bx - ax) * brz - (bz - az) * brx) / cross;
+      const u = ((bx - ax) * arz - (bz - az) * arx) / cross;
+      if (t > 0 && t < 1 && u > 0 && u < 1) { first.cuts.push(t); second.cuts.push(u); }
+    }
+  }
+
+  const activeByRing = rings.map(() => []);
+  const activeSegments = [];
+  const seen = new Set();
+  for (const segment of sourceSegments) {
+    const cuts = [...new Set(segment.cuts)].sort((a, b) => a - b);
+    for (let i = 0; i + 1 < cuts.length; i++) {
+      const t0 = cuts[i], t1 = cuts[i + 1];
+      if (t1 - t0 <= 1e-12) continue;
+      const point = t => [segment.a[0] + (segment.b[0] - segment.a[0]) * t,
+        segment.a[1] + (segment.b[1] - segment.a[1]) * t];
+      const a = point(t0), b = point(t1), mid = point((t0 + t1) / 2);
+      const dx = b[0] - a[0], dz = b[1] - a[1], length = Math.hypot(dx, dz);
+      const epsilon = Math.max(1e-7, length * 1e-9);
+      const nx = -dz / length * epsilon, nz = dx / length * epsilon;
+      if (waterAt(mid[0] + nx, mid[1] + nz) === waterAt(mid[0] - nx, mid[1] - nz)) continue;
+      const keyA = `${a[0]},${a[1]}`, keyB = `${b[0]},${b[1]}`;
+      const key = keyA < keyB ? `${keyA}|${keyB}` : `${keyB}|${keyA}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const atom = { a, b, order: segment.order + t0 };
+      activeSegments.push([a, b]);
+      activeByRing[segment.ringIndex].push(atom);
+    }
+  }
+
+  const sdf = (x, z) => {
+    if (!activeSegments.length) return 1e9;
+    let best = Infinity;
+    for (const [a, b] of activeSegments) {
+      best = Math.min(best, pointSegDist(x, z, a[0], a[1], b[0], b[1]).d);
+    }
+    if (best === 0) return 0;
+    return isLand(x, z) ? best : -best;
+  };
+
+  const shores = [];
+  const bounds = { minX: -size / 2, maxX: size / 2, minZ: -size / 2, maxZ: size / 2 };
+  for (const atoms of activeByRing) {
+    atoms.sort((a, b) => a.order - b.order);
+    const pieces = [];
+    let current = null;
+    for (const atom of atoms) {
+      const clipped = clipSegment(atom.a, atom.b, bounds);
+      const onViewportEdge = clipped && (
+        (clipped[0][0] === bounds.minX && clipped[1][0] === bounds.minX)
+        || (clipped[0][0] === bounds.maxX && clipped[1][0] === bounds.maxX)
+        || (clipped[0][1] === bounds.minZ && clipped[1][1] === bounds.minZ)
+        || (clipped[0][1] === bounds.maxZ && clipped[1][1] === bounds.maxZ)
+      );
+      if (!clipped || samePoint(clipped[0], clipped[1]) || onViewportEdge) { current = null; continue; }
+      if (current && sameShorePoint(current[current.length - 1], clipped[0])) {
+        if (!sameShorePoint(current[current.length - 1], clipped[1])) current.push(clipped[1]);
+      } else {
+        current = [clipped[0], clipped[1]];
+        pieces.push(current);
+      }
+    }
+    if (pieces.length > 1 && sameShorePoint(pieces[pieces.length - 1].at(-1), pieces[0][0])) {
+      const last = pieces.pop();
+      pieces[0] = last.slice(0, -1).concat(pieces[0]);
+    }
+    for (const pts of pieces) {
+      const closed = pts.length > 2 && sameShorePoint(pts[0], pts[pts.length - 1]);
+      if (closed) pts.pop();
+      for (const shore of boundShorePieces(pts, closed, sdf)) {
+        if (shore.pts.length >= 2) shores.push(shore);
+      }
+    }
+  }
+
+  return { kind: 'imported', polygons, shores, isLand, sdf };
+}
+
 export function makeWater(land, size) {
+  if (land.kind === 'imported') return makeImportedWater(land.records, size);
   const S = size, H = S / 2;
   const shores = []; // [{ pts: [[x,z],…], closed }]
   let isLand;
