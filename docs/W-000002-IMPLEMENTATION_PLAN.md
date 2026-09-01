@@ -82,7 +82,7 @@ All coordinates are projected local `[x, z]` arrays. Source feature order, part 
   - **Risks:** Tests must use literal data only and must not imply later provider or model integration.
   - **Acceptance criteria:** `node test/geography.mjs` and `npm test` pass; repeated normalization serializes identically; no network or filesystem loading is introduced.
 
-- [ ] **4. Ship and hand off for review**
+- [x] **4. Ship and hand off for review**
   - **Goal:** Commit only issue-scoped files and open a PR that closes #37 when merged.
   - **Deliverables:** Conventional commit `feat(geography): normalize GeoJSON fixture records`; PR body with summary, verification, and `Closes #37`; worktree retained under PR-first shipping.
   - **Dependencies:** Milestones 1–3 and successful verification.
@@ -117,7 +117,7 @@ All coordinates are projected local `[x, z]` arrays. Source feature order, part 
 
 ### Implementation status (2026-09-01)
 
-Milestones 1–3 are implemented and verified in the worktree; milestone 4 (ship) is not started.
+Milestones 1–4 are implemented, verified, and handed off in PR [#45](https://github.com/andysolomon/garden-city/pull/45).
 
 - `src/geojson.js` (new) exports `normalizeGeoJSON(input, projection)` plus the frozen
   `SUPPORTED_GEOMETRY_TYPES` and `DIAGNOSTIC_CODES` constants. It has no imports, no
@@ -144,5 +144,5 @@ Milestones 1–3 are implemented and verified in the worktree; milestone 4 (ship
 
 ### Immediate next steps
 
-1. Review the scoped diff (`src/geojson.js`, `test/geography.mjs`, `README.md`, these docs).
-2. Commit `feat(geography): normalize GeoJSON fixture records` and open a PR closing #37.
+1. Review PR [#45](https://github.com/andysolomon/garden-city/pull/45).
+2. On merge, move this plan and `docs/W-000002-progress.txt` to `docs/archive/`.

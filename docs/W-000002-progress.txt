@@ -1,7 +1,7 @@
 W-000002 - Normalize GeoJSON Geographic Fixtures - Progress
 Generated: 2026-08-31 23:52:14 EDT
-Updated: 2026-09-01 - milestones 1-3 implemented and verified; milestone 4 (ship) not started.
-Verification: `node test/geography.mjs` and `npm test` both pass.
+Updated: 2026-09-01 - implementation verified and handed off in PR #45.
+Verification: `git diff --check`, `node test/geography.mjs`, and `npm test` pass.
 On completion, move this file and the plan to docs/archive/.
 
 [x] 1.0 - Phase 1 - Provider-neutral normalization
@@ -16,5 +16,5 @@ On completion, move this file and the plan to docs/archive/.
     [x] 3.3 - Document the GeoJSON adapter in README.md
     [x] 3.4 - Run node test/geography.mjs and npm test
 [ ] 4.0 - Ship & archive
-    [ ] 4.1 - Verify / open shipping PR
+    [x] 4.1 - Verified and opened https://github.com/andysolomon/garden-city/pull/45
     [ ] 4.2 - On merge: move docs/W-000002-IMPLEMENTATION_PLAN.md + docs/W-000002-progress.txt to docs/archive/
