@@ -11,6 +11,7 @@ import {
   clipSegment,
   clipPolyline,
 } from '../src/geography.js';
+import { normalizeGeoJSON, SUPPORTED_GEOMETRY_TYPES } from '../src/geojson.js';
 
 const DEG_TO_RAD = Math.PI / 180;
 const metresPerDegree = EARTH_RADIUS_M * DEG_TO_RAD;
@@ -204,9 +205,472 @@ assert.throws(() => equator.projectSequence([0, 1]), TypeError);
 assert.throws(() => clipPolyline([[0, 0], [Infinity, 1]]), TypeError);
 assert.throws(() => isInViewport([0, 0], { minX: 1, maxX: -1, minZ: -1, maxZ: 1 }), RangeError);
 
+// --- GeoJSON normalization -------------------------------------------------
+
+assert.deepEqual(SUPPORTED_GEOMETRY_TYPES, ['LineString', 'MultiLineString', 'Polygon', 'MultiPolygon']);
+
+const lineFeature = {
+  type: 'Feature',
+  id: 'line-1',
+  properties: { name: 'Main Street', tags: { lanes: 2 } },
+  // The trailing elevation element is a valid GeoJSON position component and
+  // must be read past rather than rejected.
+  geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0.002, 12.5]] },
+};
+const multiLineFeature = {
+  type: 'Feature',
+  id: 0,
+  properties: { name: 'Branching Way' },
+  geometry: {
+    type: 'MultiLineString',
+    coordinates: [
+      [[0, 0], [0.001, 0]],
+      [[0.001, 0], [0.001, -0.002], [0.003, -0.002]],
+    ],
+  },
+};
+const polygonFeature = {
+  type: 'Feature',
+  properties: { kind: 'park' },
+  geometry: {
+    type: 'Polygon',
+    coordinates: [
+      [[0, 0], [0.004, 0], [0.004, 0.004], [0, 0.004], [0, 0]],
+      [[0.001, 0.001], [0.002, 0.001], [0.002, 0.002], [0.001, 0.002], [0.001, 0.001]],
+    ],
+  },
+};
+const multiPolygonFeature = {
+  type: 'Feature',
+  id: 42,
+  properties: {},
+  geometry: {
+    type: 'MultiPolygon',
+    coordinates: [
+      [[[0, 0], [0.001, 0], [0.001, 0.001], [0, 0]]],
+      [
+        [[0.005, 0.005], [0.008, 0.005], [0.008, 0.008], [0.005, 0.008], [0.005, 0.005]],
+        [[0.006, 0.006], [0.007, 0.006], [0.007, 0.007], [0.006, 0.006]],
+      ],
+    ],
+  },
+};
+
+const supported = {
+  type: 'FeatureCollection',
+  features: [lineFeature, multiLineFeature, polygonFeature, multiPolygonFeature],
+};
+const normalized = normalizeGeoJSON(supported, equator);
+assert.deepEqual(normalized.diagnostics, []);
+assert.equal(normalized.records.length, 4);
+assert.deepEqual(normalized.records.map(record => record.index), [0, 1, 2, 3]);
+assert.deepEqual(normalized.records.map(record => record.geometry.type), ['line', 'line', 'polygon', 'polygon']);
+
+// Exact projected nesting: one part per LineString, one entry per source part,
+// one polygon per source polygon, and rings grouped inside their polygon.
+const [lineRecord, multiLineRecord, polygonRecord, multiPolygonRecord] = normalized.records;
+assert.deepEqual(lineRecord.geometry, {
+  type: 'line',
+  parts: [[equator.project([0, 0]), equator.project([0.001, 0.002])]],
+});
+assert.deepEqual(multiLineRecord.geometry, {
+  type: 'line',
+  parts: multiLineFeature.geometry.coordinates.map(part => part.map(position => equator.project(position))),
+});
+assert.deepEqual(polygonRecord.geometry, {
+  type: 'polygon',
+  polygons: [polygonFeature.geometry.coordinates.map(ring => ring.map(position => equator.project(position)))],
+});
+assert.deepEqual(multiPolygonRecord.geometry, {
+  type: 'polygon',
+  polygons: multiPolygonFeature.geometry.coordinates.map(
+    polygon => polygon.map(ring => ring.map(position => equator.project(position))),
+  ),
+});
+assert.equal(polygonRecord.geometry.polygons[0].length, 2, 'polygon holes stay grouped with their outer ring');
+assert.equal(multiPolygonRecord.geometry.polygons.length, 2);
+assert.deepEqual(multiPolygonRecord.geometry.polygons.map(polygon => polygon.length), [1, 2]);
+
+// The projection really is applied: local metres, north as negative z.
+closePoint(lineRecord.geometry.parts[0][1], [0.001 * metresPerDegree, -0.002 * metresPerDegree]);
+for (const point of lineRecord.geometry.parts[0]) {
+  assert.equal(point.length, 2, 'elevation is dropped from projected points');
+  assert.ok(equator.isInViewport(point));
+}
+
+// Source identifiers, including numeric zero and absent ids.
+assert.deepEqual(normalized.records.map(record => record.sourceId), ['line-1', 0, null, 42]);
+assert.deepEqual(
+  normalizeGeoJSON({ ...lineFeature, id: { nope: true } }, equator).records[0].sourceId,
+  null,
+  'non string/number ids are reported as absent',
+);
+
+// Properties are copied, not aliased or shared with the source feature.
+assert.deepEqual(lineRecord.properties, { name: 'Main Street', tags: { lanes: 2 } });
+assert.notEqual(lineRecord.properties, lineFeature.properties);
+const throwaway = normalizeGeoJSON(lineFeature, equator).records[0];
+throwaway.properties.name = 'mutated';
+assert.equal(lineFeature.properties.name, 'Main Street', 'record properties are a copy, not the source object');
+assert.equal(lineRecord.properties.name, 'Main Street');
+assert.deepEqual(polygonRecord.properties, { kind: 'park' });
+assert.deepEqual(multiPolygonRecord.properties, {});
+assert.deepEqual(
+  normalizeGeoJSON({ ...polygonFeature, properties: null }, equator).records[0].properties,
+  {},
+  'missing properties normalize to an empty object',
+);
+
+// A bare Feature normalizes as a one-feature collection.
+const singleFeature = normalizeGeoJSON(multiLineFeature, equator);
+assert.deepEqual(singleFeature.diagnostics, []);
+assert.deepEqual(singleFeature.records[0].geometry, multiLineRecord.geometry);
+assert.equal(singleFeature.records[0].index, 0);
+
+// Mixed valid and unusable features: every failure is skipped with one ordered
+// diagnostic, and the trailing valid sibling still normalizes.
+const mixed = {
+  type: 'FeatureCollection',
+  features: [
+    lineFeature,
+    null,
+    { type: 'Feature', id: 'p1', properties: {}, geometry: { type: 'Point', coordinates: [0, 0] } },
+    { type: 'Feature', id: 7, properties: {}, geometry: null },
+    { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } },
+    {
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'MultiPolygon', coordinates: [[[[0, 0], [0.001, 0], [0, 0]], []]] },
+    },
+    { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[0, 0], ['a', 0]] } },
+    { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[0, 0], [0, 91]] } },
+    { type: 'Nonsense', geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0]] } },
+    polygonFeature,
+  ],
+};
+const mixedResult = normalizeGeoJSON(mixed, equator);
+assert.deepEqual(mixedResult.records.map(record => record.index), [0, 9], 'valid siblings survive malformed input');
+assert.deepEqual(mixedResult.records[0].geometry, {
+  type: 'line',
+  parts: [[equator.project([0, 0]), equator.project([0.001, 0.002])]],
+});
+assert.deepEqual(mixedResult.records[1].geometry, polygonRecord.geometry);
+assert.deepEqual(
+  mixedResult.diagnostics.map(({ index, sourceId, geometryType, code }) => [index, sourceId, geometryType, code]),
+  [
+    [1, null, null, 'invalid-feature'],
+    [2, 'p1', 'Point', 'unsupported-geometry'],
+    [3, 7, null, 'missing-geometry'],
+    [4, null, 'LineString', 'empty-geometry'],
+    [5, null, 'MultiPolygon', 'invalid-coordinate'],
+    [6, null, 'LineString', 'invalid-coordinate'],
+    [7, null, 'LineString', 'invalid-coordinate'],
+    [8, null, 'LineString', 'invalid-feature'],
+  ],
+);
+for (const diagnostic of mixedResult.diagnostics) {
+  assert.equal(typeof diagnostic.message, 'string');
+  assert.ok(diagnostic.message.length > 0);
+}
+assert.deepEqual(
+  mixedResult.diagnostics.map(diagnostic => diagnostic.index),
+  [...mixedResult.diagnostics.map(diagnostic => diagnostic.index)].sort((a, b) => a - b),
+  'diagnostics stay in source order',
+);
+assert.deepEqual(normalizeGeoJSON({ type: 'FeatureCollection', features: [] }, equator), { records: [], diagnostics: [] });
+
+// Determinism: repeated normalization of the same fixture serializes identically.
+assert.equal(JSON.stringify(normalized), JSON.stringify(normalizeGeoJSON(supported, equator)));
+assert.equal(JSON.stringify(mixedResult), JSON.stringify(normalizeGeoJSON(mixed, equator)));
+assert.equal(
+  JSON.stringify(normalizeGeoJSON(supported, makeProjection([0, 0]))),
+  JSON.stringify(normalizeGeoJSON(supported, makeProjection({ lon: 0, lat: 0 }))),
+);
+
+// Only API-level arguments throw.
+assert.throws(() => normalizeGeoJSON(null, equator), TypeError);
+assert.throws(() => normalizeGeoJSON([lineFeature], equator), TypeError);
+assert.throws(() => normalizeGeoJSON({ type: 'FeatureCollection' }, equator), TypeError);
+assert.throws(() => normalizeGeoJSON({ type: 'LineString', coordinates: [] }, equator), TypeError);
+assert.throws(() => normalizeGeoJSON(supported, {}), TypeError);
+assert.throws(() => normalizeGeoJSON(supported, null), TypeError);
+
+// Structural geometry validation: too few positions, unclosed rings, and safe
+// projection-failure capture. Valid siblings still normalize.
+const onePositionLine = {
+  type: 'FeatureCollection',
+  features: [
+    { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[0, 0]] } },
+    lineFeature,
+  ],
+};
+const onePositionResult = normalizeGeoJSON(onePositionLine, equator);
+assert.deepEqual(onePositionResult.records.map(record => record.index), [1]);
+assert.deepEqual(onePositionResult.diagnostics, [{
+  index: 0,
+  sourceId: null,
+  geometryType: 'LineString',
+  code: 'invalid-coordinate',
+  message: 'coordinates must contain at least two positions',
+}]);
+
+const shortMultiLinePart = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: {
+    type: 'MultiLineString',
+    coordinates: [[[0, 0], [0.001, 0]], [[0.002, 0]]],
+  },
+}, equator);
+assert.equal(shortMultiLinePart.records.length, 0);
+assert.deepEqual(shortMultiLinePart.diagnostics[0].code, 'invalid-coordinate');
+assert.match(shortMultiLinePart.diagnostics[0].message, /coordinates\[1\] must contain at least two positions/);
+
+const shortPolygonRing = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: {
+    type: 'Polygon',
+    coordinates: [[[0, 0], [0.001, 0], [0, 0]]],
+  },
+}, equator);
+assert.equal(shortPolygonRing.records.length, 0);
+assert.deepEqual(shortPolygonRing.diagnostics[0].code, 'invalid-coordinate');
+assert.match(shortPolygonRing.diagnostics[0].message, /coordinates\[0\] must contain at least four positions/);
+
+const unclosedPolygonRing = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: {
+    type: 'Polygon',
+    coordinates: [[[0, 0], [0.004, 0], [0.004, 0.004], [0, 0.004]]],
+  },
+}, equator);
+assert.equal(unclosedPolygonRing.records.length, 0);
+assert.deepEqual(unclosedPolygonRing.diagnostics[0].code, 'invalid-coordinate');
+assert.match(
+  unclosedPolygonRing.diagnostics[0].message,
+  /coordinates\[0\] must be closed with matching first and last longitude and latitude/,
+);
+
+const malformedMultiPolygonRing = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: {
+    type: 'MultiPolygon',
+    coordinates: [
+      [[[0, 0], [0.001, 0], [0.001, 0.001], [0, 0]]],
+      [[[0.005, 0.005], [0.008, 0.005], [0.008, 0.008], [0.005, 0.007]]],
+    ],
+  },
+}, equator);
+assert.equal(malformedMultiPolygonRing.records.length, 0);
+assert.deepEqual(malformedMultiPolygonRing.diagnostics[0].code, 'invalid-coordinate');
+assert.match(
+  malformedMultiPolygonRing.diagnostics[0].message,
+  /coordinates\[1\]\[0\] must be closed with matching first and last longitude and latitude/,
+);
+
+// Elevation differences do not affect ring closure checks.
+const closedRingWithElevation = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: {
+    type: 'Polygon',
+    coordinates: [[[0, 0, 1], [0.004, 0], [0.004, 0.004, 2], [0, 0.004], [0, 0, 99]]],
+  },
+}, equator);
+assert.equal(closedRingWithElevation.records.length, 1);
+
+const structuralRecovery = normalizeGeoJSON({
+  type: 'FeatureCollection',
+  features: [
+    { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[0, 0]] } },
+    polygonFeature,
+  ],
+}, equator);
+assert.deepEqual(structuralRecovery.records.map(record => record.index), [1]);
+assert.deepEqual(structuralRecovery.records[0].geometry, polygonRecord.geometry);
+assert.deepEqual(structuralRecovery.diagnostics[0].code, 'invalid-coordinate');
+
+function projectionThatThrows(value) {
+  return { project() { throw value; } };
+}
+
+const unformattableProjectionThrow = '\\[unformattable throw value\\]';
+
+for (const [thrown, expectedFragment] of [
+  [new Error('projection failed'), 'projection failed'],
+  ['string throw', 'string throw'],
+  [null, 'null'],
+  [undefined, 'undefined'],
+  [Object.create(null), unformattableProjectionThrow],
+  [{ toString() { throw new Error('hostile toString'); } }, unformattableProjectionThrow],
+  [{ [Symbol.toPrimitive]() { throw new Error('hostile toPrimitive'); } }, unformattableProjectionThrow],
+  [{
+    toString() { throw new Error('hostile toString'); },
+    [Symbol.toPrimitive]() { throw new Error('hostile toPrimitive'); },
+  }, unformattableProjectionThrow],
+]) {
+  const result = normalizeGeoJSON({
+    type: 'Feature',
+    properties: {},
+    geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0]] },
+  }, projectionThatThrows(thrown));
+  assert.equal(result.records.length, 0);
+  assert.deepEqual(result.diagnostics[0].code, 'invalid-coordinate');
+  assert.match(result.diagnostics[0].message, new RegExp(`could not be projected: ${expectedFragment}`));
+}
+
+const hostileProjectionRecovery = normalizeGeoJSON({
+  type: 'FeatureCollection',
+  features: [
+    { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0]] } },
+    lineFeature,
+  ],
+}, (() => {
+  let throwOnce = true;
+  return {
+    project(coordinate) {
+      if (throwOnce) {
+        throwOnce = false;
+        throw { [Symbol.toPrimitive]() { throw new Error('hostile'); } };
+      }
+      return equator.project(coordinate);
+    },
+  };
+})());
+assert.deepEqual(hostileProjectionRecovery.records.map(record => record.index), [1]);
+assert.deepEqual(hostileProjectionRecovery.diagnostics[0].code, 'invalid-coordinate');
+assert.match(hostileProjectionRecovery.diagnostics[0].message, /could not be projected: \[unformattable throw value\]/);
+
+const proxyThrowingGetPrototypeOf = new Proxy({ [Symbol.toPrimitive]() { throw new Error('hostile'); } }, {
+  getPrototypeOf() {
+    throw new Error('hostile getPrototypeOf');
+  },
+});
+const proxyThrowingGetPrototypeOfResult = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0]] },
+}, projectionThatThrows(proxyThrowingGetPrototypeOf));
+assert.equal(proxyThrowingGetPrototypeOfResult.records.length, 0);
+assert.deepEqual(proxyThrowingGetPrototypeOfResult.diagnostics[0].code, 'invalid-coordinate');
+assert.match(
+  proxyThrowingGetPrototypeOfResult.diagnostics[0].message,
+  /could not be projected: \[unformattable throw value\]/,
+);
+
+const { proxy: revokedProjectionProxy, revoke: revokeProjectionProxy } = Proxy.revocable(
+  { [Symbol.toPrimitive]() { throw new Error('hostile'); } },
+  {},
+);
+revokeProjectionProxy();
+const revokedProjectionProxyResult = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0]] },
+}, projectionThatThrows(revokedProjectionProxy));
+assert.equal(revokedProjectionProxyResult.records.length, 0);
+assert.deepEqual(revokedProjectionProxyResult.diagnostics[0].code, 'invalid-coordinate');
+assert.match(
+  revokedProjectionProxyResult.diagnostics[0].message,
+  /could not be projected: \[unformattable throw value\]/,
+);
+
+const proxyWrappedError = new Proxy(new Error('proxy-wrapped projection failure'), {
+  get(target, key) {
+    if (key === 'message') throw new Error('hostile message trap');
+    return Reflect.get(target, key);
+  },
+});
+const proxyWrappedErrorResult = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0]] },
+}, projectionThatThrows(proxyWrappedError));
+assert.equal(proxyWrappedErrorResult.records.length, 0);
+assert.deepEqual(proxyWrappedErrorResult.diagnostics[0].code, 'invalid-coordinate');
+assert.match(
+  proxyWrappedErrorResult.diagnostics[0].message,
+  /could not be projected: \[unformattable throw value\]/,
+);
+
+const projectionSiblingRecovery = normalizeGeoJSON({
+  type: 'FeatureCollection',
+  features: [
+    { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[0, 0], [0.001, 0]] } },
+    lineFeature,
+  ],
+}, (() => {
+  let throwOnce = true;
+  return {
+    project(coordinate) {
+      if (throwOnce) {
+        throwOnce = false;
+        throw proxyThrowingGetPrototypeOf;
+      }
+      return equator.project(coordinate);
+    },
+  };
+})());
+assert.deepEqual(projectionSiblingRecovery.records.map(record => record.index), [1]);
+assert.deepEqual(projectionSiblingRecovery.diagnostics[0].code, 'invalid-coordinate');
+assert.match(
+  projectionSiblingRecovery.diagnostics[0].message,
+  /could not be projected: \[unformattable throw value\]/,
+);
+
+const bigintGeometryTypeResult = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: { type: 1n, coordinates: [[0, 0], [0.001, 0]] },
+}, equator);
+assert.equal(bigintGeometryTypeResult.records.length, 0);
+assert.deepEqual(bigintGeometryTypeResult.diagnostics[0].code, 'unsupported-geometry');
+assert.match(
+  bigintGeometryTypeResult.diagnostics[0].message,
+  /geometry type 1n is not one of LineString, MultiLineString, Polygon, MultiPolygon/,
+);
+
+const hostileGeometryType = new Proxy({ evil: true }, {
+  get() {
+    throw new Error('hostile geometry type');
+  },
+});
+const hostileGeometryTypeResult = normalizeGeoJSON({
+  type: 'Feature',
+  properties: {},
+  geometry: { type: hostileGeometryType, coordinates: [[0, 0], [0.001, 0]] },
+}, equator);
+assert.equal(hostileGeometryTypeResult.records.length, 0);
+assert.deepEqual(hostileGeometryTypeResult.diagnostics[0].code, 'unsupported-geometry');
+assert.match(
+  hostileGeometryTypeResult.diagnostics[0].message,
+  /geometry type \[unformattable value\] is not one of LineString, MultiLineString, Polygon, MultiPolygon/,
+);
+
+const { proxy: revokedGeometryType, revoke: revokeGeometryType } = Proxy.revocable({}, {});
+revokeGeometryType();
+const geometryTypeSiblingRecovery = normalizeGeoJSON({
+  type: 'FeatureCollection',
+  features: [
+    { type: 'Feature', properties: {}, geometry: { type: revokedGeometryType, coordinates: [[0, 0], [0.001, 0]] } },
+    lineFeature,
+  ],
+}, equator);
+assert.deepEqual(geometryTypeSiblingRecovery.records.map(record => record.index), [1]);
+assert.deepEqual(geometryTypeSiblingRecovery.diagnostics[0].code, 'unsupported-geometry');
+assert.match(
+  geometryTypeSiblingRecovery.diagnostics[0].message,
+  /geometry type \[unformattable value\] is not one of LineString, MultiLineString, Polygon, MultiPolygon/,
+);
+
 console.log(JSON.stringify({
   tests: 'geography',
   projectedEastAtEquatorM: equator.project([1, 0])[0],
   fixturePoints: projectedFixture.length,
   clippedPieces: reentry.length,
+  geojsonRecords: normalized.records.length,
+  geojsonDiagnostics: mixedResult.diagnostics.length,
 }));
