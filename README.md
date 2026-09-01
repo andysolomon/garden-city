@@ -32,6 +32,21 @@ npm test            # 100 seeds × 9 invariants: planarity, node spacing, simple
                     # water/corridor clearance, corridor chains, determinism
 ```
 
+## Geographic coordinates
+
+`src/geography.js` provides a pure local projection for future geographic
+fixtures; it does not alter procedural city generation. Create a projection
+with an origin `{ lon, lat }` or `[lon, lat]`. Geographic coordinates are
+longitude/latitude degrees, while projected coordinates are local `[x, z]`
+coordinates in metres by default. The configured geographic origin projects to
+local `[0, 0]`; positive `x` points east, and geographic north is negative `z`
+(south is positive `z`), matching the city's top-down axis. Longitude deltas
+wrap across the antimeridian.
+
+The default inclusive crop is the 900 × 900 local viewport, `[-450, 450]` on
+both axes. Projection instances expose inverse conversion, sequence projection,
+point containment/cropping, and polyline clipping for in-viewport pieces.
+
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 
 ## Files
@@ -40,6 +55,7 @@ Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 - `src/rng.js` — seeded RNG (namespaced streams per subsystem)
 - `src/model.js` — CityModel generation (engine switch, land, rail, V1 BSP fabric, life)
 - `src/common.js` — density tables, zoning, massing grammar shared by both engines
+- `src/geography.js` — pure geographic-to-local projection and viewport cropping
 - `src/geom.js` — geometry kernel: one orientation predicate, quantization, polygon ops
 - `src/fields.js` — water SDF, population, direction and exclusion fields
 - `src/graph.js` — planar road graph: growth loop, local constraints, face extraction
