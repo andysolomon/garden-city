@@ -41,9 +41,13 @@ export class RoadGraph {
   key(cx, cz) { return cx * 65536 + cz; }
   cellOf(v) { return Math.floor(v / this.cell); }
 
-  addNode(x, z) {
+  addNode(x, z, props = null) {
     const id = this.nodes.length;
-    this.nodes.push({ x, z });
+    const node = { x, z };
+    // Imported graphs are level-aware. Keep the historical two-property node
+    // shape for every procedural caller that does not supply metadata.
+    if (props && props.level !== undefined) node.level = props.level;
+    this.nodes.push(node);
     this.adj.push([]);
     const k = this.key(this.cellOf(x), this.cellOf(z));
     if (!this.nodeHash.has(k)) this.nodeHash.set(k, []);
@@ -53,7 +57,13 @@ export class RoadGraph {
 
   addEdge(a, b, props) {
     const id = this.edges.length;
-    this.edges.push({ a, b, cls: props.cls, width: props.width || 0, bridge: !!props.bridge, roadId: props.roadId ?? -1, removed: false });
+    const edge = { a, b, cls: props.cls, width: props.width || 0, bridge: !!props.bridge, roadId: props.roadId ?? -1, removed: false };
+    // Optional imported metadata is deliberately appended only when supplied,
+    // preserving the exact procedural edge shape and its serialized output.
+    for (const key of ['sourceId', 'sourceIndex', 'sourcePart', 'level', 'tunnel', 'faceEligible']) {
+      if (props[key] !== undefined) edge[key] = props[key];
+    }
+    this.edges.push(edge);
     this.adj[a].push(id); this.adj[b].push(id);
     this.hashEdge(id, true);
     return id;
@@ -76,12 +86,16 @@ export class RoadGraph {
     const e = this.edges[id];
     const b = e.b;
     this.hashEdge(id, false);
-    const n = this.addNode(x, z);
+    const n = this.addNode(x, z, e.level === undefined ? null : { level: e.level });
     e.b = n;
     this.hashEdge(id, true);
     this.adj[b] = this.adj[b].filter(k => k !== id);
     this.adj[n].push(id);
-    this.addEdge(n, b, { cls: e.cls, width: e.width, bridge: e.bridge, roadId: e.roadId });
+    const props = { cls: e.cls, width: e.width, bridge: e.bridge, roadId: e.roadId };
+    for (const key of ['sourceId', 'sourceIndex', 'sourcePart', 'level', 'tunnel', 'faceEligible']) {
+      if (e[key] !== undefined) props[key] = e[key];
+    }
+    this.addEdge(n, b, props);
     return n;
   }
 
@@ -607,6 +621,13 @@ export function growRoads({ rng, fields, P, size, budget, centers }) {
   return { graph: g, stats };
 }
 
+// A missing flag is the procedural default. Only imported geometry explicitly
+// marked ineligible (bridges, tunnels, and nonzero levels) stays out of the
+// planar embedding; it remains live and therefore routable/debug-drawable.
+export function isFaceParticipating(edge) {
+  return !edge.removed && edge.faceEligible !== false;
+}
+
 // ---------------------------------------------------------------------------
 // Faces (docs §5): keep the component attached to the boundary, prune spurs,
 // sort half-edges by angle, walk faces, drop the outer face.
@@ -625,7 +646,7 @@ export function extractFaces(g) {
     while (stack.length) {
       const n = stack.pop();
       for (const e of g.adj[n]) {
-        if (g.edges[e].removed) continue;
+        if (!isFaceParticipating(g.edges[e])) continue;
         compEdges[id]++;
         const o = g.other(e, n);
         if (comp[o] === -1) { comp[o] = id; stack.push(o); }
@@ -635,11 +656,19 @@ export function extractFaces(g) {
   let keep = 0;
   for (let i = 1; i < compEdges.length; i++) if (compEdges[i] > compEdges[keep]) keep = i;
   let dropped = 0;
-  for (const e of g.edges) if (!e.removed && comp[e.a] !== keep) { e.removed = true; dropped++; }
+  const componentExcluded = new Uint8Array(g.edges.length);
+  g.edges.forEach((e, edgeId) => {
+    if (!isFaceParticipating(e) || comp[e.a] === keep) return;
+    componentExcluded[edgeId] = 1; dropped++;
+    // Historical procedural face extraction prunes fragments permanently.
+    // Imported components must remain usable by routing and the debug map;
+    // excluding them from this face walk is sufficient.
+    if (e.sourceIndex === undefined) e.removed = true;
+  });
 
   // 2. Spurs: iteratively strip degree-1 nodes. Their edges stay in the graph
   //    (they are real cul-de-sacs) but are excluded from the face walk.
-  const live = g.edges.map(e => !e.removed);
+  const live = g.edges.map((e, edgeId) => isFaceParticipating(e) && !componentExcluded[edgeId]);
   const deg = new Int32Array(N);
   g.edges.forEach((e, i) => { if (live[i]) { deg[e.a]++; deg[e.b]++; } });
   const spur = new Uint8Array(g.edges.length);
