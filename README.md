@@ -76,6 +76,19 @@ normalize. Only invalid API-level arguments throw. The adapter is offline and
 deterministic — it loads nothing, and it does not clip geometry, classify
 features semantically, or alter `generateCity(config)`.
 
+`src/fields.js` exposes `makeImportedWater(records, size = 900)` for normalized
+polygon records. It returns `{ kind: 'imported', polygons, shores, isLand, sdf }`.
+`polygons` is a retained copy of the polygon/ring nesting; each outer ring is
+water minus its land holes, and overlapping polygons form a water union. `sdf`
+is positive on land, negative in water, and zero on the union shoreline.
+`shores` contains deterministic, point-bounded closed rings or clipped open
+in-viewport pieces safe for the road graph. Concave rings keep extra vertices or
+split rather than emit a land-cutting chord. This graph-only simplification does
+not alter `polygons`, `isLand`, or `sdf`. The same boundary is available through
+`makeWater({ kind: 'imported', records }, size)`. This is a foundational adapter
+only: imported-water rendering and `generateCity` geographic-mode wiring remain
+deferred.
+
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 
 ## Files

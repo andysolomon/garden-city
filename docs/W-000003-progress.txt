@@ -1,0 +1,32 @@
+W-000003 - Import Arbitrary Water and Shoreline Geometry - Progress
+Generated: 2026-09-01 14:11:11 EDT
+Status: Implementation and verification complete; scoped changes left uncommitted for parent review.
+
+[x] 1.0 - Phase 1 - Imported polygon boundary
+    [x] 1.1 - Add makeImportedWater(records, size)
+    [x] 1.2 - Preserve polygon/ring nesting and compute union-aware isLand/SDF
+[x] 2.0 - Phase 2 - Graph-safe shores and fields integration
+    [x] 2.1 - Clip shoreline rings into deterministic in-viewport pieces
+    [x] 2.2 - Delegate makeWater({ kind: 'imported' }) without changing procedural modes
+[x] 3.0 - Phase 3 - Geographic fixtures and regression
+    [x] 3.1 - Extend test/geography.mjs with water-mask and geometry-retention fixtures
+    [x] 3.2 - Verify roads, buildable blocks, parcels, and buildings remain on land
+    [x] 3.3 - Document the imported water boundary contract
+    [x] 3.4 - Run node test/geography.mjs and npm test
+[x] 4.0 - Independent-verification remediation
+    [x] 4.1 - Reproduce 30-vertex disconnected-lake enclosing block (1 bad block before fix)
+    [x] 4.2 - Reproduce 500-vertex lake graph takeover (0 roads before fix)
+    [x] 4.3 - Bound graph-only imported shores to 24 deterministic ordered points
+    [x] 4.4 - Reject imported-water containment/crossing in blocks, buildables, parcels, and buildings
+    [x] 4.5 - Add deterministic 30/500-vertex graph/fabric regressions
+    [x] 4.6 - Tolerantly stitch interpolated shore endpoints and detect closure
+    [x] 4.7 - Assert 30/500-point circles are one bounded deterministic closed shore without a duplicate terminal point
+    [x] 4.8 - Re-run git diff --check, node test/geography.mjs, and npm test successfully
+[ ] 4.9 - Code-review remediation
+    [x] 4.9.1 - Reject zero-area and repeated-point imported rings
+    [x] 4.9.2 - Repair or split graph shores so decimated chords do not cut land
+    [x] 4.9.3 - Use exact ring intersection and containment for imported faces
+    [x] 4.9.4 - Verify concave, thin-ribbon, and degenerate regressions
+[ ] 5.0 - Ship & archive (intentionally deferred to parent)
+    [ ] 5.1 - Open a scoped PR that closes #38
+    [ ] 5.2 - On merge: archive docs/W-000003-IMPLEMENTATION_PLAN.md + docs/W-000003-progress.txt
