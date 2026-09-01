@@ -1,0 +1,17 @@
+W-000001 - Local Geographic Coordinate Projection - Progress
+Generated: 2026-08-31 15:47:34 EDT
+On completion, move this file and the plan to docs/archive/.
+
+[x] 1.0 - Phase 1 - Projection foundation
+    [x] 1.1 - Add validated local metre projection in src/geography.js
+    [x] 1.2 - Define origin, axis, scale, viewport, and crop conventions
+[x] 2.0 - Phase 2 - Focused verification
+    [x] 2.1 - Add test/geography.mjs fixtures and conversion assertions
+    [x] 2.2 - Cover bounded point/polyline cropping, errors, and determinism
+[x] 3.0 - Phase 3 - Regression and documentation
+    [x] 3.1 - Wire the geography harness into npm test
+    [x] 3.2 - Document the public module and coordinate convention in README.md
+    [x] 3.3 - Verify procedural generation remains unchanged
+[ ] 4.0 - Ship & archive
+    [ ] 4.1 - Verify / open shipping PR
+    [ ] 4.2 - On merge: move docs/W-000001-IMPLEMENTATION_PLAN.md + docs/W-000001-progress.txt to docs/archive/
