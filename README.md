@@ -47,6 +47,35 @@ The default inclusive crop is the 900 × 900 local viewport, `[-450, 450]` on
 both axes. Projection instances expose inverse conversion, sequence projection,
 point containment/cropping, and polyline clipping for in-viewport pieces.
 
+`src/geojson.js` adds `normalizeGeoJSON(input, projection)`, a pure
+provider-neutral adapter from GeoJSON fixtures to local coordinates. It accepts
+a `Feature` or `FeatureCollection` and returns `{ records, diagnostics }`:
+
+```js
+import { makeProjection } from './src/geography.js';
+import { normalizeGeoJSON } from './src/geojson.js';
+
+const { records, diagnostics } = normalizeGeoJSON(featureCollection, makeProjection([lon, lat]));
+```
+
+Each valid feature becomes one record `{ index, sourceId, properties, geometry }`
+in source order. `sourceId` is the GeoJSON `feature.id` (including `0`) or
+`null` when absent, and `properties` is a copy of the feature's properties, or
+`{}`. `LineString` and `MultiLineString` normalize to
+`{ type: 'line', parts }`; `Polygon` and `MultiPolygon` normalize to
+`{ type: 'polygon', polygons }`, where each polygon is its outer ring followed
+by its hole rings. Part, polygon, ring, and coordinate order are all retained,
+and every coordinate is a projected local `[x, z]` pair.
+
+Malformed, empty, and unsupported features never abort the collection: each is
+skipped with one ordered diagnostic
+`{ index, sourceId, geometryType, code, message }`, using the stable codes
+`invalid-feature`, `missing-geometry`, `unsupported-geometry`,
+`empty-geometry`, and `invalid-coordinate`, while valid siblings still
+normalize. Only invalid API-level arguments throw. The adapter is offline and
+deterministic — it loads nothing, and it does not clip geometry, classify
+features semantically, or alter `generateCity(config)`.
+
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 
 ## Files
@@ -56,6 +85,7 @@ Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 - `src/model.js` — CityModel generation (engine switch, land, rail, V1 BSP fabric, life)
 - `src/common.js` — density tables, zoning, massing grammar shared by both engines
 - `src/geography.js` — pure geographic-to-local projection and viewport cropping
+- `src/geojson.js` — pure GeoJSON fixture normalization into local records + diagnostics
 - `src/geom.js` — geometry kernel: one orientation predicate, quantization, polygon ops
 - `src/fields.js` — water SDF, population, direction and exclusion fields
 - `src/graph.js` — planar road graph: growth loop, local constraints, face extraction
