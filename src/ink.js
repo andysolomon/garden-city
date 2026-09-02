@@ -15,9 +15,9 @@
 import * as THREE from 'three';
 import { RNG } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
-import { flatPolygonsGeometry, polygonPrismsGeometry, groundY, terrainFrame, drapeSegmentsForSpan, anchorFootprint, pillar, bridgeDeckY, bridgeDeckLookup, elevatedRailY, terrainCells, terrainSkirtGeometry, BRIDGE_FLAT_Y, DRAPE_EDGE_SEGMENTS, RAIL_FLAT_Y } from './render.js';
+import { flatPolygonsGeometry, polygonPrismGeometry, polygonPrismsGeometry, groundY, terrainFrame, drapeSegmentsForSpan, anchorFootprint, pillar, bridgeDeckY, bridgeDeckLookup, elevatedRailY, terrainCells, terrainSkirtGeometry, BRIDGE_FLAT_Y, DRAPE_EDGE_SEGMENTS, RAIL_FLAT_Y } from './render.js';
 import { orientedRect } from './geom.js';
-import { positionOnRoute } from './routing.js';
+import { positionOnRoute, routeCarPlacement } from './routing.js';
 
 export const INK_THEMES = {
   day:   { paper: 0xeae6dd, ink: 0x1c1a18, road: 0xded7c7, park: 0xdcd6c2, plaza: 0xe4dfd2, water: 0xaabfc5, accent: 0xe8501e, dark: false },
@@ -257,6 +257,18 @@ export function renderInk(viewer, model) {
   // Water: translucent tint + outline. Sea also gets a drawn island ground.
   for (const w of model.water) {
     const wy = surface ? waterTop - 1.6 : .2;
+    if (w.type === 'imported') {
+      // Imported polygon water: a thin prism with every hole cut out, and a
+      // faint outline along the outer ring and each island shore.
+      const mesh = new THREE.Mesh(polygonPrismGeometry(w.polygon, w.holes, 1.6),
+        fillMat(T.water, { transparent: true, opacity: .5, depthWrite: false }));
+      mesh.position.y = wy;
+      world.add(mesh);
+      const oy = surface ? waterTop : 2.2;
+      faint.poly(w.polygon, oy);
+      for (const hole of w.holes || []) faint.poly(hole, oy);
+      continue;
+    }
     world.add(instancedBoxes([{ ...w, h: 1.6, y: wy }],
       fillMat(T.water, { transparent: true, opacity: .5, depthWrite: false })));
     faint.rect(w.x, surface ? waterTop : 2.2, w.z, w.w, w.d);
@@ -421,9 +433,11 @@ function renderMovingInkCars(viewer, model, T, at = (x, z, y = 0) => y, deckAt =
   const update = elapsed => {
     cars.forEach((car, i) => {
       const p = positionOnRoute(model.graph, car, elapsed);
-      d.position.set(p.x, p.bridge ? deckAt(p.x, p.z) + 3.4 : at(p.x, p.z, 1.4), p.z);
+      const placement = routeCarPlacement(p, at, deckAt, 1.4, 3.4);
+      d.position.set(placement.x, placement.y, placement.z);
       d.rotation.set(0, p.rot, 0);
-      d.scale.set(car.s, car.s, car.s);
+      const scale = placement.visible ? car.s : 0;
+      d.scale.set(scale, scale, scale);
       d.updateMatrix();
       mesh.setMatrixAt(i, d.matrix);
     });

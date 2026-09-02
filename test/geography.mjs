@@ -14,8 +14,11 @@ import {
 import { normalizeGeoJSON, SUPPORTED_GEOMETRY_TYPES } from '../src/geojson.js';
 import { makeImportedWater, makeWater } from '../src/fields.js';
 import { graphFabric } from '../src/fabric.js';
+import { generateCity } from '../src/model.js';
+import { drawMap } from '../src/map.js';
+import { positionOnRoute, routeCarPlacement } from '../src/routing.js';
 import { RNG } from '../src/rng.js';
-import { centroid, orientedRect, pointInPolygon } from '../src/geom.js';
+import { centroid, isSimple, orientedRect, pointInPolygon } from '../src/geom.js';
 
 const DEG_TO_RAD = Math.PI / 180;
 const metresPerDegree = EARTH_RADIUS_M * DEG_TO_RAD;
@@ -976,6 +979,185 @@ function containsRing(poly, ring) {
   }
   return false;
 }
+
+// --- W-000005: geographic-mode generateCity ------------------------------
+const geoLine = (index, points, properties = {}) => ({
+  index, sourceId: `road-${index}`, properties, geometry: { type: 'line', parts: [points] },
+});
+const geoRecords = (() => {
+  const records = [];
+  const axes = [-150, -50, 50, 150];
+  for (const x of axes) records.push(geoLine(records.length, [[x, -150], [x, 150]]));
+  for (const z of axes) records.push(geoLine(records.length, [[-150, z], [150, z]]));
+  records.push(geoLine(records.length, [[150, 0], [260, 0]], { bridge: 'yes' }));
+  records.push(geoLine(records.length, [[-150, 0], [-260, 0]], { tunnel: 'yes' }));
+  records.push({
+    index: records.length, sourceId: 'lake', properties: {},
+    geometry: { type: 'polygon', polygons: [[closedRect(250, 250, 400, 400), closedRect(300, 300, 350, 350)]] },
+  });
+  return records;
+})();
+const geoConfig = {
+  seed: 'geo', source: 'geographic', geography: { records: geoRecords, diagnostics: [{ code: 'upstream-note' }] },
+  density: 'med', pattern: 'manhattan', sector: 'mixed', detail: 'low', massing: 'modern',
+  land: 'flat', rail: 'none', life: 'none', air: 'none',
+};
+const geoModel = generateCity(geoConfig);
+assert.equal(geoModel.source, 'geographic');
+for (const key of ['roads', 'bridges', 'roadCaps', 'water', 'blocks', 'parcels', 'buildings', 'parks', 'plazas', 'corridors', 'faces']) {
+  assert.ok(Array.isArray(geoModel[key]), `geographic model.${key} is an array`);
+}
+assert.ok(geoModel.graph && geoModel.stats && geoModel.traffic, 'geographic model exposes graph/stats/traffic');
+assert.ok(geoModel.roads.length > 0 && geoModel.bridges.length === 1 && geoModel.corridors.length > 0);
+const geoEdges = geoModel.graph.edges;
+for (const entry of [...geoModel.roads, ...geoModel.bridges]) {
+  const e = geoEdges[entry.edge];
+  assert.ok(e && Number.isInteger(e.sourceIndex) && typeof e.roadId === 'string', 'rendered road resolves to imported provenance');
+  assert.equal(geoRecords[e.sourceIndex].geometry.type, 'line');
+  assert.ok(!e.tunnel && !((e.level ?? 0) < 0), 'below-grade edges are not rendered as surface roads');
+  assert.equal(entry.bridge, !!(e.bridge || (e.level ?? 0) > 0));
+}
+assert.equal(geoEdges[geoModel.bridges[0].edge].bridge, true);
+assert.ok(geoEdges.some(e => e.tunnel), 'tunnel edge is retained as graph data');
+assert.ok(geoModel.roadCaps.length > 0 && geoModel.roadCaps.every(c => !c.elevated), 'no cap is fully elevated in the fixture');
+assert.ok(geoModel.faces.length > 0);
+for (const face of geoModel.faces) {
+  assert.ok(face.area > 0 && isSimple(face.polygon), 'geographic faces are simple with positive area');
+}
+assert.ok(geoModel.blocks.length > 0 && geoModel.parcels.length > 0 && geoModel.buildings.length > 0);
+assert.ok(geoModel.parcels.some(p => p.frontage), 'geographic parcels carry frontage');
+assert.equal(geoModel.water.length, 1);
+assert.equal(geoModel.water[0].type, 'imported');
+assert.equal(geoModel.water[0].polygon.length, 4);
+assert.deepEqual(geoModel.water[0].holes.map(h => h.length), [4]);
+assert.equal(geoModel.water[0].sourceId, 'lake');
+assert.ok(geoModel.geography && Array.isArray(geoModel.geography.diagnostics) && geoModel.geography.stats);
+assert.deepEqual(geoModel.geography.upstreamDiagnostics, [{ code: 'upstream-note' }]);
+assert.equal(geoModel.stats.lineRecords, 10);
+const importerCountKeys = [
+  'records', 'lineRecords', 'skippedRecords', 'sourceParts', 'sourceSegments',
+  'candidateSubsegments', 'nodes', 'edges', 'duplicateSegments', 'components',
+  'roadComponents', 'disconnectedComponents', 'disconnectedEdges', 'diagnostics',
+  'bridges', 'elevatedEdges', 'bridgeElevatedEdges',
+];
+for (const key of importerCountKeys) {
+  assert.ok(Number.isFinite(geoModel.stats.import[key]), `geographic stats.import.${key}`);
+  assert.equal(geoModel.geography.stats[key], geoModel.stats.import[key], `geography/import stats disagree for ${key}`);
+}
+assert.equal(geoModel.stats.import.diagnostics, geoModel.geography.diagnostics.length);
+assert.equal(geoModel.stats.import.bridgeElevatedEdges, 1);
+for (const key of ['nodes', 'edges', 'faces', 'corridors']) {
+  assert.ok(Number.isFinite(geoModel.stats[key]), `top-level UI stats.${key}`);
+}
+for (const key of ['faces', 'spurs', 'droppedEdges', 'degenerateFaces', 'offsetDrops', 'landlocked', 'slivers', 'corridors']) {
+  assert.ok(Number.isFinite(geoModel.stats[key]), `geographic stats.${key}`);
+}
+assert.equal(JSON.stringify(generateCity(geoConfig)), JSON.stringify(geoModel), 'geographic generation is deterministic');
+
+// Authoritative imported water rejects an untagged surface road instead of
+// clipping or silently promoting it. The same source span is valid when its
+// metadata explicitly marks a bridge or a positive level.
+const centralWater = {
+  index: 8, sourceId: 'central-lake', properties: {},
+  geometry: { type: 'polygon', polygons: [[closedRect(-25, -25, 25, 25)]] },
+};
+const waterCrossingRecords = properties => [
+  ...geoRecords.slice(0, 8), centralWater,
+  { ...geoLine(9, [[-50, 0], [50, 0]], properties), sourceId: 'lake-crossing' },
+];
+const crossingError = /geographic source has unusable road-water data: at-grade edge=\d+ sourceIndex=9 sourceId="lake-crossing".*enters imported water/;
+assert.throws(() => generateCity({
+  ...geoConfig, seed: 'geo-water-invalid', geography: { records: waterCrossingRecords({}) },
+}), crossingError);
+const bridgeCrossingModel = generateCity({
+  ...geoConfig, seed: 'geo-water-bridge', geography: { records: waterCrossingRecords({ bridge: 'yes' }) },
+});
+const elevatedCrossingModel = generateCity({
+  ...geoConfig, seed: 'geo-water-elevated', geography: { records: waterCrossingRecords({ level: 1 }) },
+});
+for (const [label, model] of [['bridge', bridgeCrossingModel], ['elevated', elevatedCrossingModel]]) {
+  const crossing = model.graph.edges.find(e => e.sourceId === 'lake-crossing');
+  assert.ok(crossing, `${label} lake crossing remains in the imported graph`);
+  assert.ok(model.bridges.some(entry => entry.edge === model.graph.edges.indexOf(crossing)), `${label} lake crossing renders on a deck`);
+  assert.ok(model.blocks.length && model.parcels.length && model.buildings.length, `${label} water-safe fabric remains buildable`);
+  const safePolygons = [
+    ...model.blocks.flatMap(block => block.buildablePieces || (block.buildable ? [block.buildable] : [])),
+    ...model.parcels.map(parcel => parcel.polygon),
+    ...model.buildings.map(building => building.footprint || orientedRect(building.cx, building.cz, building.w, building.d, building.angle || 0)),
+  ];
+  assert.ok(safePolygons.length > 0, `${label} fixture exposes buildable geometry`);
+  for (const [polygonIndex, polygon] of safePolygons.entries()) for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i], b = polygon[(i + 1) % polygon.length];
+    const samples = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2));
+    for (let k = 0; k <= samples; k++) {
+      const t = k / samples;
+      assert.ok(model.fields.water.sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) > .5,
+        `${label} buildable polygon ${polygonIndex} enters water`);
+    }
+  }
+}
+
+const routePosition = (model, predicate) => {
+  const edge = model.graph.edges.findIndex(predicate);
+  assert.ok(edge >= 0, 'route grade fixture edge exists');
+  const metadata = model.graph.edges[edge];
+  return positionOnRoute(model.graph, {
+    path: [edge], nodes: [metadata.a, metadata.b], routeLength: model.graph.edgeLength(edge),
+    t: 0, speed: 0, x: 0, z: 0, rot: 0,
+  });
+};
+const bridgePosition = routePosition(geoModel, e => e.bridge);
+assert.deepEqual({ bridge: bridgePosition.bridge, elevated: bridgePosition.elevated, belowGrade: bridgePosition.belowGrade, tunnel: bridgePosition.tunnel },
+  { bridge: true, elevated: true, belowGrade: false, tunnel: false });
+const tunnelPosition = routePosition(geoModel, e => e.tunnel);
+assert.deepEqual({ bridge: tunnelPosition.bridge, elevated: tunnelPosition.elevated, belowGrade: tunnelPosition.belowGrade, tunnel: tunnelPosition.tunnel },
+  { bridge: false, elevated: false, belowGrade: true, tunnel: true });
+const elevatedPosition = routePosition(elevatedCrossingModel, e => e.sourceId === 'lake-crossing');
+assert.deepEqual({ bridge: elevatedPosition.bridge, elevated: elevatedPosition.elevated, belowGrade: elevatedPosition.belowGrade, tunnel: elevatedPosition.tunnel },
+  { bridge: false, elevated: true, belowGrade: false, tunnel: false });
+assert.equal(positionOnRoute({ edgeLength: () => 0 }, { x: 1, z: 2, rot: 3, bridge: true }).bridge, true,
+  'legacy non-routed bridge state retains its boolean meaning');
+
+assert.deepEqual(routeCarPlacement(elevatedPosition, () => 100, () => 200, 1.4, 3.4),
+  { x: elevatedPosition.x, y: 203.4, z: elevatedPosition.z, visible: true });
+assert.deepEqual(routeCarPlacement(elevatedPosition, () => 100, () => 200, 2.3, 3.5),
+  { x: elevatedPosition.x, y: 203.5, z: elevatedPosition.z, visible: true });
+assert.equal(routeCarPlacement(tunnelPosition, () => 100, () => 200, 1.4, 3.4).visible, false);
+assert.equal(routeCarPlacement(tunnelPosition, () => 100, () => 200, 2.3, 3.5).visible, false);
+
+// Imported water reaches the map canvas as outer ring + hole with an even-odd fill.
+const canvasCalls = [];
+const canvasCtx = new Proxy({
+  beginPath() { canvasCalls.push(['begin']); }, moveTo(x, y) { canvasCalls.push(['move', x, y]); },
+  lineTo(x, y) { canvasCalls.push(['line', x, y]); }, closePath() { canvasCalls.push(['close']); },
+  fill(rule) { canvasCalls.push(['fill', rule ?? null]); },
+  setLineDash() {}, save() {}, restore() {}, fillRect() {}, stroke() {}, arc() {}, translate() {}, rotate() {}, fillText() {},
+}, { set(target, key, value) { target[key] = value; return true; } });
+const waterOnly = Object.fromEntries(['edges', 'nodes', 'spurs', 'faces', 'water', 'elevation', 'population', 'direction', 'reserved',
+  'walkshed', 'blocks', 'parcels', 'buildings', 'labels', 'traffic'].map(k => [k, k === 'water']));
+drawMap(canvasCtx, geoModel, 200, 200, waterOnly);
+const waterBegin = canvasCalls.findIndex(c => c[0] === 'begin');
+const waterFill = canvasCalls.findIndex((c, i) => i > waterBegin && c[0] === 'fill');
+assert.ok(waterBegin >= 0 && waterFill > waterBegin, 'imported water traced a canvas path');
+const waterPath = canvasCalls.slice(waterBegin + 1, waterFill);
+assert.equal(waterPath.filter(c => c[0] === 'move').length, 2, 'outer ring and hole each start a subpath');
+assert.equal(waterPath.filter(c => c[0] === 'close').length, 2);
+assert.equal(waterPath.filter(c => c[0] === 'line').length, 6);
+assert.deepEqual(canvasCalls[waterFill], ['fill', 'evenodd']);
+
+// Unusable geographic road data throws a clear, recoverable error.
+const geoErr = /geographic source has no usable road faces/;
+assert.throws(() => generateCity({ ...geoConfig, geography: { records: [] } }), geoErr);
+assert.throws(() => generateCity({ ...geoConfig, geography: { records: [geoRecords.at(-1)] } }), geoErr);
+assert.throws(() => generateCity({ ...geoConfig, geography: { records: [geoLine(0, [[0, 0], [100, 0]])] } }), geoErr);
+assert.throws(() => generateCity({ ...geoConfig, geography: null }), TypeError);
+assert.throws(() => generateCity({ ...geoConfig, engine: 'bsp' }), /graph engine/);
+assert.equal(JSON.stringify(generateCity(geoConfig)), JSON.stringify(geoModel), 'geographic generation recovers after errors');
+const proceduralConfig = { ...geoConfig, source: undefined, geography: undefined, seed: 'procedural-after-geo' };
+const proceduralAfter = generateCity(proceduralConfig);
+assert.ok(proceduralAfter.roads.length > 0 && proceduralAfter.source !== 'geographic');
+assert.equal(proceduralAfter.geography, undefined);
+assert.equal(JSON.stringify(generateCity(proceduralConfig)), JSON.stringify(proceduralAfter), 'procedural path is unchanged');
 
 console.log(JSON.stringify({
   tests: 'geography',

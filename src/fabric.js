@@ -8,7 +8,8 @@
 
 import { CITY_SIZE, DENSITY, pickZone, massBuilding } from './common.js';
 import { makeWater, makePopulation, makeDirection, makeExclusion, makeNoise, makeElevation } from './fields.js';
-import { growRoads, extractFaces, VIRTUAL } from './graph.js';
+import { growRoads, extractFaces, VIRTUAL, WATER_TOLERANCE } from './graph.js';
+import { importRoadGraph } from './roadgraph-import.js';
 import { buildableAreas, subdivideParcels, findFrontage, mergeLandlockedParcels, fitRect } from './blocks.js';
 import { resolvePreset } from './presets.js';
 import { buildCorridors } from './corridors.js';
@@ -19,6 +20,78 @@ import {
 } from './geom.js';
 
 export function graphFabric(model, land, rng, config) {
+  return buildFabric(model, land, rng, config, proceduralGraph);
+}
+
+// Geographic fabric: the same pipeline, but the road graph is imported from
+// normalized line records (W-000004) instead of grown from the fields. Every
+// rendered road/bridge keeps its imported edge provenance; below-grade edges
+// stay routable graph data but never become surface geometry.
+export function geographicFabric(model, land, rng, config) {
+  return buildFabric(model, land, rng, config, importedGraph);
+}
+
+function proceduralGraph({ rng, fields, P, size, dcfg, centers }) {
+  const budget = Math.round(dcfg.budget * P.budgetScale);
+  P.parallelGap = Math.min(P.spacing.major, P.spacing.minor) * .4;
+  return growRoads({ rng, fields, P, size, budget, centers });
+}
+
+function importedGraph({ config, size, fields }) {
+  const geography = config.geography;
+  const records = geography.records;
+  const { graph, diagnostics, stats } = importRoadGraph(records, { viewportSize: size });
+  rejectAtGradeWaterEdges(graph, fields.water);
+  const fx = extractFaces(graph);
+  if (!fx.faces.length) {
+    const codes = [...new Set(diagnostics.map(d => d.code))];
+    throw new Error(`geographic source has no usable road faces (records=${stats.records}, lineRecords=${stats.lineRecords}, edges=${stats.edges}, faces=0` +
+      `${codes.length ? `, diagnostics: ${codes.join(', ')}` : ''})`);
+  }
+  const bridgeElevatedEdges = graph.edges.filter(e => !e.removed && (e.bridge || (e.level ?? 0) > 0)).length;
+  const importStats = { ...stats, bridges: bridgeElevatedEdges, elevatedEdges: bridgeElevatedEdges, bridgeElevatedEdges };
+  return {
+    graph, faces: fx,
+    stats: importStats,
+    importStats,
+    geography: {
+      diagnostics: diagnostics.map(d => ({ ...d })),
+      stats: { ...importStats },
+      upstreamDiagnostics: Array.isArray(geography.diagnostics) ? geography.diagnostics.map(d => ({ ...d })) : [],
+    },
+  };
+}
+
+// Imported water is authoritative. A source road may cross it only when the
+// source metadata explicitly makes that edge a bridge/elevated or below grade.
+// Sampling at half the graph's shoreline tolerance catches narrow incursions;
+// points no farther than the quantization tolerance into water are accepted so
+// quantized shore endpoints retain the same tolerance as procedural roads.
+function rejectAtGradeWaterEdges(graph, water) {
+  const step = WATER_TOLERANCE / 2;
+  for (let edge = 0; edge < graph.edges.length; edge++) {
+    const e = graph.edges[edge];
+    if (e.removed || e.bridge || e.tunnel || (e.level ?? 0) !== 0) continue;
+    const a = graph.nodes[e.a], b = graph.nodes[e.b];
+    const samples = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / step));
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples, x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+      const distance = water.sdf(x, z);
+      if (water.isLand(x, z) || distance >= -WATER_TOLERANCE) continue;
+      throw new Error('geographic source has unusable road-water data: ' +
+        `at-grade edge=${edge} sourceIndex=${e.sourceIndex ?? 'unknown'} sourceId=${JSON.stringify(e.sourceId ?? null)} ` +
+        `sourcePart=${e.sourcePart ?? 'unknown'} roadId=${JSON.stringify(e.roadId)} enters imported water at ` +
+        `x=${x.toFixed(3)}, z=${z.toFixed(3)}, sdf=${distance.toFixed(3)}`);
+    }
+  }
+}
+
+// Surface edges become roads/bridges/caps. Tunnels and below-grade imported
+// edges are routing data only. Procedural edges carry neither field.
+const isSurface = e => !e.removed && !VIRTUAL.has(e.cls) && !e.tunnel && !((e.level ?? 0) < 0);
+const isElevated = e => e.bridge || (e.level ?? 0) > 0;
+
+function buildFabric(model, land, rng, config, buildGraph) {
   const dcfg = DENSITY[config.density];
   const P = resolvePreset(config.pattern);
   const size = CITY_SIZE;
@@ -75,29 +148,31 @@ export function graphFabric(model, land, rng, config) {
   model.centers = centers;
 
   // ---- growth + faces ------------------------------------------------------
-  const budget = Math.round(dcfg.budget * P.budgetScale);
-  P.parallelGap = Math.min(P.spacing.major, P.spacing.minor) * .4;
-  const { graph: g, stats } = growRoads({ rng, fields, P, size, budget, centers: growthCenters });
-  const fx = extractFaces(g);
+  const built = buildGraph({ rng, fields, P, size, dcfg, centers: growthCenters, config });
+  const g = built.graph, stats = built.stats;
+  const fx = built.faces || extractFaces(g);
   model.graph = g;
   model.faces = fx.faces;
   model.stats = { ...stats, faces: fx.faces.length, spurs: fx.spurCount, droppedEdges: fx.droppedEdges, degenerateFaces: fx.degenerateFaces, offsetDrops: 0, landlocked: 0, slivers: 0 };
+  if (built.importStats) model.stats.import = { ...built.importStats };
+  if (built.geography) model.geography = built.geography;
 
   // ---- roads, bridges, junction caps --------------------------------------
   for (let i = 0; i < g.edges.length; i++) {
     const e = g.edges[i];
-    if (e.removed || VIRTUAL.has(e.cls)) continue;
+    if (!isSurface(e)) continue;
     const a = g.nodes[e.a], b = g.nodes[e.b];
     const angle = Math.atan2(b.z - a.z, b.x - a.x), len = Math.hypot(b.x - a.x, b.z - a.z);
     const cx = (a.x + b.x) / 2, cz = (a.z + b.z) / 2;
     const polygon = orientedRect(cx, cz, len, e.width, angle);
-    const entry = { polygon, cls: e.cls, type: e.cls === 'arterial' ? 'arterial' : 'street', width: e.width, a: [a.x, a.z], b: [b.x, b.z], angle, len, cx, cz, edge: i, bridge: e.bridge, ...bbox(polygon) };
-    if (e.bridge) model.bridges.push(entry); else model.roads.push(entry);
+    const elevated = isElevated(e);
+    const entry = { polygon, cls: e.cls, type: e.cls === 'arterial' ? 'arterial' : 'street', width: e.width, a: [a.x, a.z], b: [b.x, b.z], angle, len, cx, cz, edge: i, bridge: elevated, ...bbox(polygon) };
+    if (elevated) model.bridges.push(entry); else model.roads.push(entry);
   }
   model.corridors = buildCorridors(g, config.seed, config.massing);
   model.stats.corridors = model.corridors.length;
   for (let n = 0; n < g.nodes.length; n++) {
-    const inc = g.adj[n].filter(e => !g.edges[e].removed && !VIRTUAL.has(g.edges[e].cls));
+    const inc = g.adj[n].filter(e => isSurface(g.edges[e]));
     if (inc.length < 2) continue;
     if (inc.length === 2) {
       const a0 = g.angleFrom(n, inc[0]), a1 = g.angleFrom(n, inc[1]);
@@ -106,7 +181,7 @@ export function graphFabric(model, land, rng, config) {
     const r = Math.max(...inc.map(e => g.edges[e].width)) / 2;
     const N = g.nodes[n], poly = [];
     for (let k = 0; k < 12; k++) { const t = k / 12 * Math.PI * 2; poly.push([N.x + Math.cos(t) * r, N.z + Math.sin(t) * r]); }
-    model.roadCaps.push({ polygon: poly, x: N.x, z: N.z, r, elevated: inc.every(e => g.edges[e].bridge) });
+    model.roadCaps.push({ polygon: poly, x: N.x, z: N.z, r, elevated: inc.every(e => isElevated(g.edges[e])) });
   }
 
   // ---- faces → blocks ------------------------------------------------------

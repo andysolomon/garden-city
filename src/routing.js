@@ -252,7 +252,13 @@ export function positionOnRoute(graph, car, elapsed = 0) {
   const nodes = car.nodes || [];
   const total = car.routeLength ?? routeLength(graph, path);
   if (!path.length || nodes.length !== path.length + 1 || !Number.isFinite(total) || total <= 0) {
-    return { x: car.x, z: car.z, rot: car.rot, bridge: !!car.bridge, edge: path[0] ?? -1 };
+    const bridge = !!car.bridge, tunnel = !!car.tunnel;
+    return {
+      x: car.x, z: car.z, rot: car.rot, bridge,
+      elevated: car.elevated === undefined ? bridge : !!car.elevated,
+      belowGrade: car.belowGrade === undefined ? tunnel : !!car.belowGrade,
+      tunnel, edge: path[0] ?? -1,
+    };
   }
 
   const cycle = total * 2;
@@ -275,7 +281,28 @@ export function positionOnRoute(graph, car, elapsed = 0) {
   const u = Math.max(0, Math.min(1, (travel - offset) / length));
   const x = from.x + (to.x - from.x) * u, z = from.z + (to.z - from.z) * u;
   const angle = Math.atan2(to.z - from.z, to.x - from.x) + (forward ? 0 : Math.PI);
-  return { x, z, rot: -angle, bridge: !!graph.edges[edge].bridge, edge };
+  const metadata = graph.edges[edge];
+  const bridge = !!metadata.bridge, tunnel = !!metadata.tunnel;
+  return {
+    x, z, rot: -angle, bridge,
+    elevated: bridge || (metadata.level ?? 0) > 0,
+    belowGrade: tunnel || (metadata.level ?? 0) < 0,
+    tunnel, edge,
+  };
+}
+
+// Convert a routed grade state into a renderer transform. Both 3D renderers
+// use this seam with their own body/deck offsets so positive-level cars ride
+// the deck and below-grade cars have no surface-visible instance.
+export function routeCarPlacement(position, at, deckAt, surfaceOffset, deckOffset) {
+  if (position.belowGrade) return { x: position.x, y: 0, z: position.z, visible: false };
+  const elevated = position.elevated === undefined ? !!position.bridge : !!position.elevated;
+  return {
+    x: position.x,
+    y: elevated ? deckAt(position.x, position.z) + deckOffset : at(position.x, position.z, surfaceOffset),
+    z: position.z,
+    visible: true,
+  };
 }
 
 export function routeLength(graph, path) {
