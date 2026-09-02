@@ -1,0 +1,31 @@
+W-000005 - Add Geographic Fabric Mode - Progress
+Generated: 2026-09-01 20:42:58 EDT
+On completion, move this file and the plan to docs/archive/.
+Status: implementation complete (phases 1-4 plus failed-verification corrections); phase 5 ship/archive intentionally deferred to parent orchestrator.
+Updated: 2026-09-01
+
+[x] 1.0 - Phase 1 - Geographic model contract and errors
+    [x] 1.1 - Validate source: geographic and geography.records
+    [x] 1.2 - Preserve procedural graph/BSP selection and RNG behavior
+    [x] 1.3 - Add clear unusable-road-face error and recovery coverage
+[x] 2.0 - Phase 2 - Imported road fabric
+    [x] 2.1 - Add the importRoadGraph fabric source seam
+    [x] 2.2 - Derive roads, bridges, caps, faces, blocks, parcels, and frontage
+    [x] 2.3 - Surface importer diagnostics/stats and preserve edge provenance
+    [x] 2.4 - Nest complete importer counters at stats.import while retaining UI counters
+    [x] 2.5 - Reject untagged at-grade imported roads entering authoritative water
+[x] 3.0 - Phase 3 - Imported water rendering
+    [x] 3.1 - Add polygon-with-holes CityModel water entries
+    [x] 3.2 - Render imported water in map mode
+    [x] 3.3 - Render imported water in ink and solid modes
+[x] 4.0 - Phase 4 - Verification and documentation
+    [x] 4.1 - Add deterministic end-to-end geographic fixture assertions
+    [x] 4.2 - Run node test/geography.mjs and node test/roadgraph-import.mjs
+    [x] 4.3 - Run npm test and git diff --check
+    [x] 4.4 - Browser/PNG checklist passed in parent verification: local server + headless Chromium rendered the geographic fixture in map, ink, and solid modes; valid noncommitted PNGs were produced at 780x437, 1654x2339, and 780x437 respectively, with imported water and its hole visible.
+    [x] 4.5 - Document the geographic config and error contract
+    [x] 4.6 - Cover bridge/elevated/below-grade route flags and moving-car placement/visibility
+    [x] 4.7 - Confirm procedural graph and BSP CityModel JSON are byte-identical to HEAD
+[ ] 5.0 - Ship & archive
+    [ ] 5.1 - Open a scoped PR that closes #40
+    [ ] 5.2 - On merge: move docs/W-000005-IMPLEMENTATION_PLAN.md + docs/W-000005-progress.txt to docs/archive/

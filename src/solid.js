@@ -8,7 +8,7 @@ import { mat, addBox, addBoxes, flatPolygonsGeometry, polygonPrismGeometry, terr
 import { hashSeed } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
 import { orientedRect } from './geom.js';
-import { positionOnRoute } from './routing.js';
+import { positionOnRoute, routeCarPlacement } from './routing.js';
 
 const palettes = {
   concrete: { bg: 0xd8d2c5, ground: 0xc7c1b5, road: 0x77736d, roadLine: 0xe8dcc2, water: 0x78919c, park: 0x8d967b, build: [0xc7bfae, 0xa9aaa6, 0x998f83, 0xd0c5ad, 0x8f9698], accent: 0xe8501e },
@@ -85,6 +85,13 @@ export function renderSolid(viewer, model) {
       island.scale.z = rz / rx;
       island.position.y = -.8;
       world.add(island);
+    } else if (w.type === 'imported') {
+      // Imported polygon water: extruded outer ring with every island hole.
+      const water = new THREE.Mesh(polygonPrismGeometry(w.polygon, w.holes, 2),
+        new THREE.MeshStandardMaterial({ color: pal.water, roughness: .35, transparent: true, opacity: .82 }));
+      water.position.y = surface ? waterTop - 2 : 1;
+      water.receiveShadow = true;
+      world.add(water);
     } else {
       addBox(world, { ...w, h: 2 }, new THREE.MeshStandardMaterial({ color: pal.water, roughness: .35, transparent: true, opacity: .82 }), surface ? waterTop - 2 : 1);
     }
@@ -293,9 +300,11 @@ function renderCars(viewer, model, pal, at = (x, z, y = 0) => y, deckAt = () => 
   const update = elapsed => {
     model.cars.forEach((c, i) => {
       const p = c.path && model.graph ? positionOnRoute(model.graph, c, elapsed) : c;
-      d.position.set(p.x, p.bridge ? deckAt(p.x, p.z) + 3.5 : at(p.x, p.z, 2.3), p.z);
+      const placement = routeCarPlacement(p, at, deckAt, 2.3, 3.5);
+      d.position.set(placement.x, placement.y, placement.z);
       d.rotation.set(0, p.rot, 0);
-      d.scale.set(c.s, c.s, c.s);
+      const scale = placement.visible ? c.s : 0;
+      d.scale.set(scale, scale, scale);
       d.updateMatrix();
       im.setMatrixAt(i, d.matrix);
     });

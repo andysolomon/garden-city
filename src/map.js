@@ -54,6 +54,14 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
         ctx.fillRect(X(-S), Z(-S), 2 * S * v.scale, 2 * S * v.scale);
         ctx.fillStyle = paper;
         path(f.water.shores[0].pts); ctx.fill();
+      } else if (wtr.type === 'imported') {
+        // Outer ring plus every hole in one path; even-odd leaves islands as paper.
+        ctx.beginPath();
+        for (const ring of [wtr.polygon, ...(wtr.holes || [])]) {
+          ring.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Z(p[1])) : ctx.moveTo(X(p[0]), Z(p[1])));
+          ctx.closePath();
+        }
+        ctx.fill('evenodd');
       } else ctx.fillRect(X(wtr.x), Z(wtr.z), wtr.w * v.scale, wtr.d * v.scale);
     }
   }

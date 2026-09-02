@@ -85,9 +85,38 @@ is positive on land, negative in water, and zero on the union shoreline.
 in-viewport pieces safe for the road graph. Concave rings keep extra vertices or
 split rather than emit a land-cutting chord. This graph-only simplification does
 not alter `polygons`, `isLand`, or `sdf`. The same boundary is available through
-`makeWater({ kind: 'imported', records }, size)`. This is a foundational adapter
-only: imported-water rendering and `generateCity` geographic-mode wiring remain
-deferred.
+`makeWater({ kind: 'imported', records }, size)`. This adapter is a pure
+boundary helper; geographic-mode generation (below) consumes normalized records
+directly.
+
+### Geographic mode
+
+`generateCity({ source: 'geographic', geography: { records, diagnostics? }, ... })`
+builds the city from imported roads instead of procedural road growth. It stays
+synchronous and seeded. Line records are roads, polygon records are water, and
+the graph engine's fabric pipeline (faces → blocks → parcels → frontage →
+buildings) runs unchanged on the imported graph, so every rendered road or
+bridge carries `edge` provenance back to `model.graph.edges[i].sourceIndex`,
+`sourceId`, `sourcePart`, and `roadId`. At-grade edges render as roads,
+bridges/elevated edges render as bridges, and tunnels/below-grade edges stay in
+`model.graph` and `model.corridors` as routing data without surface roads or
+caps. Imported polygon water renders with holes in map, ink, and solid as
+`model.water` entries `{ type: 'imported', polygon, holes, sourceIndex, sourceId }`.
+The full numeric importer counters, including diagnostics and derived
+bridge/elevated counts, are available at `model.stats.import`; the top-level
+`nodes`, `edges`, `faces`, and `corridors` counters used by the UI remain
+numeric. `model.geography` exposes `{ diagnostics, stats, upstreamDiagnostics }`.
+Imported water is authoritative: a live untagged at-grade road that enters it
+beyond the graph's quantization tolerance throws an edge/source-specific
+unusable-data error. Source-tagged bridge/elevated crossings remain valid;
+tunnel/below-grade edges remain routable. `positionOnRoute()` reports
+`bridge`, `elevated`, `belowGrade`, and `tunnel`; ink and solid cars ride decks
+when elevated and are hidden from the surface while below grade. Empty,
+polygon-only, or otherwise faceless road data throws a recoverable
+`geographic source has no usable road faces (...)` error; the next call works
+normally. Configs without `source: 'geographic'` follow the procedural graph or
+BSP paths unchanged. Hybrid mode, imported buildings/parks, provider loading, and
+UI controls remain deferred.
 
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 

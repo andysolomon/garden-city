@@ -519,18 +519,28 @@ export function terrainSkirtGeometry(plate, y0, sample, n = 16 * DRAPE_EDGE_SEGM
   return geo;
 }
 
-// Polygon prism in world XZ, optionally with a courtyard hole. Shape-space Y
-// is negated before rotating so positive extrusion depth becomes world +Y.
-export function polygonPrismGeometry(footprint, courtyard, height) {
+// Polygon prism in world XZ, optionally with holes: `holes` is either a single
+// courtyard ring (buildings) or an array of rings (imported water islands).
+// Shape-space Y is negated before rotating so positive extrusion depth becomes
+// world +Y.
+export function polygonPrismGeometry(footprint, holes, height) {
   const ring = pts => pts.map(([x, z]) => new THREE.Vector2(x, -z));
   const shape = new THREE.Shape(ring(footprint));
-  if (courtyard?.length >= 3) shape.holes.push(new THREE.Path(ring(courtyard)));
+  for (const hole of holeRings(holes)) shape.holes.push(new THREE.Path(ring(hole)));
   const geo = new THREE.ExtrudeGeometry(shape, {
     depth: height, bevelEnabled: false, curveSegments: 1, steps: 1,
   });
   geo.rotateX(-Math.PI / 2);
   geo.computeVertexNormals();
   return geo;
+}
+
+// Normalize a prism hole argument: null, one ring ([[x,z],…]), or a list of
+// rings. Rings shorter than three points are ignored.
+export function holeRings(holes) {
+  if (!Array.isArray(holes) || !holes.length) return [];
+  const list = Array.isArray(holes[0]) && Array.isArray(holes[0][0]) ? holes : [holes];
+  return list.filter(r => Array.isArray(r) && r.length >= 3);
 }
 
 // Merge arbitrarily shaped building prisms into one geometry/material bucket.

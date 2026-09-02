@@ -21,7 +21,7 @@
 
 import { RNG } from './rng.js';
 import { CITY_SIZE, DENSITY, intersects, pickZone, massBuilding } from './common.js';
-import { graphFabric } from './fabric.js';
+import { graphFabric, geographicFabric } from './fabric.js';
 import { rectPoly, bbox, pointInPolygon } from './geom.js';
 import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute, sampleTraffic } from './routing.js';
 
@@ -39,11 +39,17 @@ export function generateCity(config) {
     rail: null, landmarks: [], water: [], reserved: [],
   };
 
-  const land = makeLand(config.land, rng, model);
+  // Geographic source: imported line records replace procedural road growth
+  // and imported polygon records are water. Everything downstream of the road
+  // graph is the shared graph fabric.
+  const geographic = config.source === 'geographic';
+  if (geographic) model.source = 'geographic';
+  const land = geographic ? makeGeographicLand(config, model) : makeLand(config.land, rng, model);
   // Rail is planned before any building exists so the corridor can be reserved.
   planRail(config.rail, model, rng);
 
-  if (config.engine === 'bsp') bspFabric(model, land, rng, config);
+  if (geographic) geographicFabric(model, land, rng, config);
+  else if (config.engine === 'bsp') bspFabric(model, land, rng, config);
   else graphFabric(model, land, rng, config);
 
   annotateTraffic(model);
@@ -170,6 +176,39 @@ function makeLand(kind, rng, model) {
     } };
   }
   return { kind: 'flat', mask: () => true };
+}
+
+// Geographic land: imported polygon records are water, line records are the
+// road graph (see geographicFabric). Water entries keep the outer ring and
+// every hole so renderers can draw lakes with islands; bbox comes from the
+// outer ring. Draws no RNG so a geographic run never shifts the `:city`
+// stream ahead of rail planning.
+function makeGeographicLand(config, model) {
+  const geography = config.geography;
+  if (!geography || typeof geography !== 'object' || !Array.isArray(geography.records)) {
+    throw new TypeError('geographic source requires config.geography.records to be an array of normalized records');
+  }
+  if (config.engine === 'bsp') throw new Error('geographic source requires the graph engine (config.engine = "graph")');
+  const records = geography.records.filter(r => r && r.geometry?.type === 'polygon');
+  for (const record of records) {
+    if (!Array.isArray(record.geometry.polygons)) throw new TypeError('polygon geometry polygons must be an array');
+    for (const rings of record.geometry.polygons) {
+      if (!Array.isArray(rings) || !rings.length) throw new TypeError('each polygon must contain at least one ring');
+      const [outer, ...holes] = rings.map(openRing);
+      model.water.push({ type: 'imported', polygon: outer, holes, sourceIndex: record.index, sourceId: record.sourceId ?? null, ...bbox(outer) });
+    }
+  }
+  return { kind: 'imported', records, mask: () => true };
+}
+
+function openRing(ring) {
+  if (!Array.isArray(ring)) throw new TypeError('polygon rings must be arrays');
+  const pts = ring.map(p => {
+    if (!Array.isArray(p) || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) throw new TypeError('polygon coordinates must be finite [x, z] points');
+    return [p[0], p[1]];
+  });
+  const first = pts[0], last = pts[pts.length - 1];
+  return pts.length > 1 && first[0] === last[0] && first[1] === last[1] ? pts.slice(0, -1) : pts;
 }
 
 // Rail is planned first and reserves its right-of-way (plus station
@@ -502,7 +541,10 @@ function addRoutedCars(level, model, rng) {
       originCorridor: origin.name, originCorridorId: origin.id,
       destinationCorridor: destination.name, destinationCorridorId: destination.id,
     };
-    Object.assign(car, positionOnRoute(graph, car, 0));
+    // Keep the serialized car contract byte-identical for procedural callers;
+    // grade flags are evaluated from the active edge at render time.
+    const { x, z, rot, bridge, edge } = positionOnRoute(graph, car, 0);
+    Object.assign(car, { x, z, rot, bridge, edge });
     model.cars.push(car);
   }
 }
