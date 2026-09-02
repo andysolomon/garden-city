@@ -29,6 +29,6 @@ On merge: move docs/W-000006-IMPLEMENTATION_PLAN.md and docs/W-000006-progress.t
     [x] 4.6 Remediate verification defects: validate finite levels-derived heights, treat false-like building/water tags as disabled, reject zero-area/non-simple imported building/park rings with deterministic diagnostics, synchronize top-level/geography/import diagnostic counters after imported-feature rejections (src/fabric.js), and restore the parks layer in contact.html thumbnails; regression assertions added in test/geography.mjs
 
 [ ] 5.0 Ship PR
-    [ ] 5.1 Commit issue-scoped files with Conventional Commits and Closes #41
-    [ ] 5.2 Push branch and open PR in --ship pr mode
+    [x] 5.1 Commit issue-scoped files with Conventional Commits and Closes #41
+    [x] 5.2 Push branch and open PR #49 in --ship pr mode
     [ ] 5.3 After merge, move plan/progress to docs/archive/ and remove the worktree
