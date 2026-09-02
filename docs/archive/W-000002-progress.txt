@@ -15,6 +15,6 @@ On completion, move this file and the plan to docs/archive/.
     [x] 3.2 - Verify malformed sibling recovery, determinism, and no-network purity
     [x] 3.3 - Document the GeoJSON adapter in README.md
     [x] 3.4 - Run node test/geography.mjs and npm test
-[ ] 4.0 - Ship & archive
+[x] 4.0 - Ship & archive
     [x] 4.1 - Verified and opened https://github.com/andysolomon/garden-city/pull/45
-    [ ] 4.2 - On merge: move docs/W-000002-IMPLEMENTATION_PLAN.md + docs/W-000002-progress.txt to docs/archive/
+    [x] 4.2 - After merge: moved plan/progress to docs/archive/

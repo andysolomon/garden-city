@@ -14,6 +14,6 @@ Status: Implementation complete and verified; scoped changes left uncommitted fo
     [x] 3.1 - Add test/roadgraph-import.mjs fixtures
     [x] 3.2 - Verify routing, face extraction, and debug-map compatibility
     [x] 3.3 - Run node test/roadgraph-import.mjs and npm test
-[ ] 4.0 - Ship & archive (intentionally deferred to parent; this task prohibits commits/PR mutation)
-    [ ] 4.1 - Open a scoped PR that closes #39
-    [ ] 4.2 - On merge: archive docs/W-000004-IMPLEMENTATION_PLAN.md + docs/W-000004-progress.txt
+[x] 4.0 - Ship & archive (intentionally deferred to parent; this task prohibits commits/PR mutation)
+    [x] 4.1 - Open a scoped PR that closes #39
+    [x] 4.2 - After merge: moved plan/progress to docs/archive/

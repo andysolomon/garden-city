@@ -22,11 +22,11 @@ Status: Implementation and verification complete; scoped changes left uncommitte
     [x] 4.6 - Tolerantly stitch interpolated shore endpoints and detect closure
     [x] 4.7 - Assert 30/500-point circles are one bounded deterministic closed shore without a duplicate terminal point
     [x] 4.8 - Re-run git diff --check, node test/geography.mjs, and npm test successfully
-[ ] 4.9 - Code-review remediation
+[x] 4.9 - Code-review remediation
     [x] 4.9.1 - Reject zero-area and repeated-point imported rings
     [x] 4.9.2 - Repair or split graph shores so decimated chords do not cut land
     [x] 4.9.3 - Use exact ring intersection and containment for imported faces
     [x] 4.9.4 - Verify concave, thin-ribbon, and degenerate regressions
-[ ] 5.0 - Ship & archive (intentionally deferred to parent)
-    [ ] 5.1 - Open a scoped PR that closes #38
-    [ ] 5.2 - On merge: archive docs/W-000003-IMPLEMENTATION_PLAN.md + docs/W-000003-progress.txt
+[x] 5.0 - Ship & archive (intentionally deferred to parent)
+    [x] 5.1 - Open a scoped PR that closes #38
+    [x] 5.2 - After merge: moved plan/progress to docs/archive/
