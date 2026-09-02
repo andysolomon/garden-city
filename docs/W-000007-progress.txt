@@ -1,0 +1,34 @@
+W-000007 Add hybrid geographic and procedural mode - Progress
+Generated: 2026-09-02 13:34:22 EDT
+Plan: docs/W-000007-IMPLEMENTATION_PLAN.md
+Issue: #42
+Branch: feat/W-000007-add-hybrid-geographic-procedural
+On merge: move docs/W-000007-IMPLEMENTATION_PLAN.md and docs/W-000007-progress.txt to docs/archive/.
+
+[x] 1.0 Add the hybrid source seam and RNG namespace
+    [x] 1.1 Recognize and label source: hybrid
+    [x] 1.2 Route hybrid through geographic validation and imported fabric
+    [x] 1.3 Isolate hybrid layout and life draws in seed + :hybrid
+
+[x] 2.0 Prove infrastructure, buildability, life, and determinism
+    [x] 2.1 Compare imported road/provenance and shoreline geometry
+    [x] 2.2 Assert procedural massing and trees avoid water, reservations, and source claims
+    [x] 2.3 Assert traffic and routed cars use valid imported graph edges
+    [x] 2.4 Assert repeated hybrid serialization is byte-identical
+    [x] 2.5 Prove procedural graph, BSP, and geographic outputs remain unchanged
+    [x] 2.6 Remediate hybrid procedural park/tree claim, water, and rail exclusions
+    [x] 2.7 Directly replay :hybrid rail, fabric, and life RNG draws
+    [x] 2.8 Prove unsafe rail-reservation and imported-water park candidates, then hybrid exclusion
+
+[x] 3.0 Document and verify renderer/export compatibility
+    [x] 3.1 Document hybrid config, constraints, claims, and RNG namespace
+    [x] 3.2 Run map adapter checks and inspect hybrid map, ink, and solid output
+    [x] 3.3 Headless Chromium rendered the normalized hybrid fixture in map, solid, ink, and poster paths; valid temporary PNGs were inspected (1200x657 map/solid/ink, 1654x2339 poster) and removed
+
+[ ] 4.0 Verify and ship PR
+    [x] 4.1 Run node test/geography.mjs
+    [x] 4.2 Run node test/roadgraph-import.mjs
+    [x] 4.3 Run npm test
+    [ ] 4.4 Commit issue-scoped files with Conventional Commits and Closes #42
+    [ ] 4.5 Push branch and open PR in --ship pr mode
+    [ ] 4.6 After merge, move plan/progress to docs/archive/ and remove the worktree

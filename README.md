@@ -127,7 +127,8 @@ deterministic `model.geography.diagnostics` entries with codes
 `imported-building-water` or `imported-building-reserved`. Accepted imported
 buildings and parks claim their polygons before procedural geographic massing
 is accepted, so generated buildings cannot overlap them. This claim filtering
-is geographic-only. Source records and rings are copied rather than mutated.
+applies to geographic and hybrid sources. Source records and rings are copied
+rather than mutated.
 
 The full numeric importer counters, including diagnostics and derived
 bridge/elevated counts, are available at `model.stats.import`; the top-level
@@ -141,9 +142,26 @@ tunnel/below-grade edges remain routable. `positionOnRoute()` reports
 when elevated and are hidden from the surface while below grade. Empty,
 polygon-only, or otherwise faceless road data throws a recoverable
 `geographic source has no usable road faces (...)` error; the next call works
-normally. Configs without `source: 'geographic'` follow the procedural graph or
-BSP paths unchanged. Hybrid mode, provider loading, geocoding UI, caching, and
-arbitrary park-hole rendering remain deferred.
+normally. Configs without `source: 'geographic'` or `source: 'hybrid'` follow
+the procedural graph or BSP paths unchanged. Provider loading, geocoding UI,
+caching, and arbitrary park-hole rendering remain deferred.
+
+### Hybrid mode
+
+`generateCity({ source: 'hybrid', geography: { records, diagnostics? }, ... })`
+keeps imported roads, water, and accepted building/park claims authoritative,
+then runs the existing face, parcel, massing, tree, traffic, and life systems
+on the remaining valid land. It stays synchronous and seeded. Classification,
+provenance, water-crossing, missing-face, and BSP-engine errors are the same
+as geographic mode. Hybrid rail, fabric/massing, trees, and non-traffic life
+draw from `seed + ':hybrid'`; existing `:city`, `:traffic`, and `:noise`
+streams are unchanged for geographic and source-omitted configs. Procedural
+massing is accepted only outside water, reserved rectangles, and imported
+claims. Hybrid procedural parks follow the same exclusions. Trees may populate
+accepted imported parks, but remain outside authoritative water, reserved
+infrastructure, and imported building footprints. Shared map, ink, solid,
+poster, and PNG paths consume the same CityModel with no source-specific
+renderer branch.
 
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 
@@ -186,7 +204,7 @@ Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 - Infrastructure (water, rail, landmark) claims its footprint *before*
   buildings are placed — nothing is pasted over the fabric afterwards.
 - Every random draw comes from a seeded, namespaced stream
-  (`seed + ':city'`, `':ink'`, `':meta'`, …) so the same seed always
+  (`seed + ':city'`, `':hybrid'`, `':ink'`, `':meta'`, …) so the same seed always
   reproduces the same city in every renderer.
 
 ## License

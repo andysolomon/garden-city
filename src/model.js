@@ -31,7 +31,8 @@ export const WALKSHED_BUDGET = 300;
 
 export function generateCity(config) {
   config = { engine: 'graph', pattern: 'manhattan', ...config };
-  const rng = new RNG(config.seed + ':city');
+  const importedSource = config.source === 'geographic' || config.source === 'hybrid';
+  const rng = new RNG(config.seed + (config.source === 'hybrid' ? ':hybrid' : ':city'));
   const model = {
     config, seed: config.seed, size: CITY_SIZE, engine: config.engine,
     roads: [], roadCaps: [], bridges: [], blocks: [], parcels: [], buildings: [],
@@ -39,15 +40,15 @@ export function generateCity(config) {
     rail: null, landmarks: [], water: [], reserved: [],
   };
 
-  // Geographic source: imported line records replace procedural road growth;
-  // classified polygon records become water or authoritative fabric entries.
-  const geographic = config.source === 'geographic';
-  if (geographic) model.source = 'geographic';
-  const land = geographic ? makeGeographicLand(config, model) : makeLand(config.land, rng, model);
+  // Geographic and hybrid sources: imported line records replace procedural
+  // road growth; classified polygon records become water or authoritative
+  // fabric entries. Hybrid rail/fabric/life draws use seed + ':hybrid'.
+  if (importedSource) model.source = config.source;
+  const land = importedSource ? makeGeographicLand(config, model) : makeLand(config.land, rng, model);
   // Rail is planned before any building exists so the corridor can be reserved.
   planRail(config.rail, model, rng);
 
-  if (geographic) geographicFabric(model, land, rng, config);
+  if (importedSource) geographicFabric(model, land, rng, config);
   else if (config.engine === 'bsp') bspFabric(model, land, rng, config);
   else graphFabric(model, land, rng, config);
 
@@ -570,11 +571,19 @@ function addLife(level, model, rng) {
       if (p.field || p.court) continue;
       for (let i = 0, tries = 0; i < 5 && tries < 30; tries++) {
         const x = rng.float(p.x, p.x + p.w), z = rng.float(p.z, p.z + p.d);
-        if (!pointInPolygon(x, z, p.polygon)) continue;
+        if (!pointInPolygon(x, z, p.polygon) || !lifeTreeAllowed(x, z)) continue;
         model.trees.push({ x, z, s: rng.float(.65, 1.2) });
         i++;
       }
     }
+  }
+
+  function lifeTreeAllowed(x, z) {
+    if (model.source !== 'hybrid') return true;
+    if (!(model.fields?.water?.sdf(x, z) > .5)) return false;
+    if (model.reserved.some(rect => x >= rect.x && x <= rect.x + rect.w && z >= rect.z && z <= rect.z + rect.d)) return false;
+    return !model.buildings.some(building => building.imported && building.footprint
+      && pointInPolygon(x, z, building.footprint));
   }
 }
 

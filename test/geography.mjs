@@ -19,7 +19,7 @@ import { generateCity } from '../src/model.js';
 import { drawMap, LAYERS } from '../src/map.js';
 import { positionOnRoute, routeCarPlacement } from '../src/routing.js';
 import { RNG, hashSeed } from '../src/rng.js';
-import { area, bbox, centroid, isSimple, orientedRect, pointInPolygon, segIntersect } from '../src/geom.js';
+import { area, bbox, centroid, isSimple, orientedRect, pointInPolygon, polyIntersectsRect, segIntersect } from '../src/geom.js';
 
 const DEG_TO_RAD = Math.PI / 180;
 const metresPerDegree = EARTH_RADIUS_M * DEG_TO_RAD;
@@ -1381,6 +1381,307 @@ const proceduralAfter = generateCity(proceduralConfig);
 assert.ok(proceduralAfter.roads.length > 0 && proceduralAfter.source !== 'geographic');
 assert.equal(proceduralAfter.geography, undefined);
 assert.equal(JSON.stringify(generateCity(proceduralConfig)), JSON.stringify(proceduralAfter), 'procedural path is unchanged');
+
+// --- W-000007: hybrid imported infrastructure + procedural fill -------------
+const proceduralGraphConfig = {
+  seed: 'hybrid-compat-graph', pattern: 'manhattan', density: 'med', land: 'flat',
+  rail: 'none', life: 'none', air: 'none',
+};
+const bspCompatConfig = { ...proceduralGraphConfig, seed: 'hybrid-compat-bsp', engine: 'bsp' };
+const geographicBeforeHybrid = JSON.stringify(geoModel);
+const proceduralGraphBeforeHybrid = JSON.stringify(generateCity(proceduralGraphConfig));
+const bspBeforeHybrid = JSON.stringify(generateCity(bspCompatConfig));
+
+const hybridConfig = { ...footprintConfig, seed: 'hybrid', source: 'hybrid', life: 'high' };
+const hybridSnapshot = JSON.stringify(footprintRecords);
+const hybridModel = generateCity(hybridConfig);
+assert.equal(JSON.stringify(footprintRecords), hybridSnapshot, 'hybrid generation mutated source records');
+assert.equal(hybridModel.source, 'hybrid');
+assert.ok(hybridModel.graph && hybridModel.traffic && hybridModel.geography);
+
+const hybridGeographicTwin = generateCity({ ...hybridConfig, source: 'geographic' });
+const importedRoadSignature = model => [...model.roads, ...model.bridges].map(entry => {
+  const e = model.graph.edges[entry.edge];
+  return [entry.a, entry.b, entry.angle, entry.width, entry.len, entry.bridge,
+    e.sourceIndex, e.sourceId, e.sourcePart, e.roadId];
+});
+const shorelineSignature = model => model.water.map(water =>
+  [water.type, water.sourceIndex, water.sourceId, water.sourcePart, water.polygon, water.holes]);
+assert.deepEqual(importedRoadSignature(hybridModel), importedRoadSignature(hybridGeographicTwin),
+  'hybrid imported road axes/provenance match the geographic fixture');
+assert.deepEqual(shorelineSignature(hybridModel), shorelineSignature(hybridGeographicTwin),
+  'hybrid shoreline rings match the geographic fixture');
+assert.deepEqual(
+  hybridModel.buildings.filter(building => building.imported).map(building =>
+    [building.sourceIndex, building.sourceId, building.sourcePart, building.h, building.footprint]),
+  hybridGeographicTwin.buildings.filter(building => building.imported).map(building =>
+    [building.sourceIndex, building.sourceId, building.sourcePart, building.h, building.footprint]),
+  'hybrid keeps authoritative imported building claims');
+assert.notEqual(JSON.stringify(hybridModel), JSON.stringify(hybridGeographicTwin),
+  'hybrid :hybrid stream must not reproduce the geographic :city serialization');
+
+const hybridClaims = [
+  ...hybridModel.buildings.filter(building => building.imported).map(building => building.footprint),
+  ...hybridModel.parks.filter(park => park.imported).map(park => park.polygon),
+];
+const hybridImportedBuildings = hybridModel.buildings.filter(building => building.imported).map(building => building.footprint);
+const hybridGenerated = hybridModel.buildings.filter(building => !building.imported);
+assert.ok(hybridGenerated.length > 0, 'hybrid retains procedural massing on unclaimed land');
+for (const [buildingIndex, building] of hybridGenerated.entries()) {
+  const footprint = building.footprint || orientedRect(building.cx, building.cz, building.w, building.d, building.angle || 0);
+  for (const [claimIndex, claim] of hybridClaims.entries()) {
+    assert.equal(polygonsOverlap(footprint, claim), false,
+      `hybrid generated building ${buildingIndex} overlaps imported claim ${claimIndex}`);
+  }
+  assert.equal(hybridModel.reserved.some(rect => polyIntersectsRect(footprint, rect)), false,
+    `hybrid generated building ${buildingIndex} intersects reserved infrastructure`);
+  for (let i = 0; i < footprint.length; i++) {
+    const a = footprint[i], b = footprint[(i + 1) % footprint.length];
+    const samples = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 2));
+    for (let k = 0; k <= samples; k++) {
+      const t = k / samples;
+      assert.ok(hybridModel.fields.water.sdf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t) > .5,
+        `hybrid generated building ${buildingIndex} enters water`);
+    }
+  }
+}
+
+const hybridProceduralParks = hybridModel.parks.filter(park => !park.imported);
+assert.ok(hybridProceduralParks.length > 0, 'hybrid retains procedural parks on valid land');
+assert.ok(hybridModel.faces.some(face => hybridModel.water.some(water => polygonsOverlap(face.polygon, water.polygon))),
+  'hybrid water fixture cuts a source road face');
+for (const [parkIndex, park] of hybridProceduralParks.entries()) {
+  assert.equal(hybridClaims.some(claim => polygonsOverlap(park.polygon, claim)), false,
+    `hybrid procedural park ${parkIndex} overlaps an imported claim`);
+  assert.equal(hybridModel.reserved.some(rect => polyIntersectsRect(park.polygon, rect)), false,
+    `hybrid procedural park ${parkIndex} intersects reserved infrastructure`);
+  assert.equal(hybridModel.water.some(water => polygonsOverlap(park.polygon, water.polygon)), false,
+    `hybrid procedural park ${parkIndex} enters authoritative water`);
+}
+
+assert.ok(hybridModel.trees.length > 0, 'hybrid life places procedural trees');
+const treeHosts = [...hybridModel.parks, ...hybridModel.plazas];
+for (const [treeIndex, tree] of hybridModel.trees.entries()) {
+  assert.ok(treeHosts.some(host => host.polygon && pointInPolygon(tree.x, tree.z, host.polygon)),
+    `hybrid tree ${treeIndex} is outside park/plaza polygons`);
+  assert.equal(hybridModel.fields.water.sdf(tree.x, tree.z) > .5, true,
+    `hybrid tree ${treeIndex} enters authoritative water`);
+  assert.equal(hybridModel.reserved.some(rect =>
+    tree.x >= rect.x && tree.x <= rect.x + rect.w && tree.z >= rect.z && tree.z <= rect.z + rect.d), false,
+  `hybrid tree ${treeIndex} intersects reserved infrastructure`);
+  assert.equal(hybridImportedBuildings.some(claim => pointInPolygon(tree.x, tree.z, claim)), false,
+    `hybrid tree ${treeIndex} enters an imported building claim`);
+}
+
+// Adding a source building around a tree that the same seed would otherwise
+// place makes the park/tree claim checks non-vacuous without changing RNG input.
+const claimBaselineConfig = { ...geoConfig, seed: 'claim-0', source: 'hybrid', life: 'high' };
+const claimBaseline = generateCity(claimBaselineConfig);
+const claimedParkCandidate = claimBaseline.parks.find(park => !park.imported);
+assert.ok(claimedParkCandidate, 'claim probe has a procedural park candidate');
+const claimedTreeCandidate = claimBaseline.trees.find(tree =>
+  pointInPolygon(tree.x, tree.z, claimedParkCandidate.polygon));
+assert.ok(claimedTreeCandidate, 'claim probe has a procedural tree candidate');
+const treeClaim = closedRect(
+  claimedTreeCandidate.x - 1, claimedTreeCandidate.z - 1,
+  claimedTreeCandidate.x + 1, claimedTreeCandidate.z + 1,
+);
+assert.ok(polygonsOverlap(claimedParkCandidate.polygon, treeClaim)
+  && pointInPolygon(claimedTreeCandidate.x, claimedTreeCandidate.z, treeClaim),
+  'source-building probe covers a park and tree that would otherwise be placed');
+const treeClaimRecord = geoPolygon(geoRecords.length, 'hybrid-tree-claim', { building: 'yes' }, [[treeClaim]]);
+const claimedHybrid = generateCity({
+  ...claimBaselineConfig, geography: { records: [...geoRecords, treeClaimRecord] },
+});
+const acceptedTreeClaim = claimedHybrid.buildings.find(building => building.sourceId === 'hybrid-tree-claim');
+assert.ok(acceptedTreeClaim?.imported, 'hybrid accepts the probe building claim');
+assert.equal(claimedHybrid.parks.some(park => !park.imported && polygonsOverlap(park.polygon, acceptedTreeClaim.footprint)), false,
+  'hybrid procedural parks exclude imported building claims');
+assert.equal(claimedHybrid.trees.some(tree => pointInPolygon(tree.x, tree.z, acceptedTreeClaim.footprint)), false,
+  'hybrid procedural trees exclude imported building claims');
+
+// Adding imported water around a tree that the same seed would otherwise
+// place makes park/tree water checks non-vacuous without changing RNG input.
+const waterBaselineConfig = { ...geoConfig, seed: 'water-0', source: 'hybrid', life: 'high' };
+const waterBaseline = generateCity(waterBaselineConfig);
+const waterParkCandidate = waterBaseline.parks.find(park => !park.imported);
+assert.ok(waterParkCandidate, 'water probe has a procedural park candidate');
+const waterTreeCandidate = waterBaseline.trees.find(tree =>
+  pointInPolygon(tree.x, tree.z, waterParkCandidate.polygon));
+assert.ok(waterTreeCandidate, 'water probe has a procedural tree candidate');
+const probePond = closedRect(
+  waterTreeCandidate.x - 1, waterTreeCandidate.z - 1,
+  waterTreeCandidate.x + 1, waterTreeCandidate.z + 1,
+);
+assert.ok(polygonsOverlap(waterParkCandidate.polygon, probePond)
+  && pointInPolygon(waterTreeCandidate.x, waterTreeCandidate.z, probePond),
+  'imported-water probe covers a park and tree that would otherwise be placed');
+const probePondRecord = geoPolygon(geoRecords.length, 'hybrid-water-probe', { natural: 'water' }, [[probePond]]);
+const wateredHybrid = generateCity({
+  ...waterBaselineConfig, geography: { records: [...geoRecords, probePondRecord] },
+});
+assert.ok(wateredHybrid.water.some(water => water.sourceId === 'hybrid-water-probe'),
+  'hybrid accepts the probe water polygon');
+assert.equal(
+  wateredHybrid.parks.some(park => !park.imported && polygonsOverlap(park.polygon, waterParkCandidate.polygon)),
+  false,
+  'hybrid omits the water-overlapping procedural park candidate',
+);
+assert.equal(
+  wateredHybrid.parks.some(park => !park.imported
+    && wateredHybrid.water.some(water => polygonsOverlap(park.polygon, water.polygon))),
+  false,
+  'hybrid procedural parks exclude imported water',
+);
+assert.equal(wateredHybrid.trees.some(tree => pointInPolygon(tree.x, tree.z, probePond)), false,
+  'hybrid omits trees from the water-overlapping park candidate');
+assert.equal(wateredHybrid.trees.some(tree => !(wateredHybrid.fields.water.sdf(tree.x, tree.z) > .5)), false,
+  'hybrid procedural trees stay on land');
+
+// A tiny face keeps the RNG grammar bounded: rail consumes two draws, medieval
+// fabric consumes CBD x/z plus one direction draw, and short roads consume one
+// legacy life draw each. Two unsafe imported parks then reject 30 x/z probes
+// apiece before the safe park's first tree, allowing direct stream replay.
+const streamSeed = 'hybrid-stream-proof';
+const streamRng = new RNG(streamSeed + ':hybrid');
+const expectedRailVertical = streamRng.bool();
+const expectedRailOffset = streamRng.float(-100, 100);
+const railParkRing = expectedRailVertical
+  ? closedRect(expectedRailOffset - 2, -2, expectedRailOffset + 2, 2)
+  : closedRect(-2, expectedRailOffset - 2, 2, expectedRailOffset + 2);
+const railBuildingRing = expectedRailVertical
+  ? closedRect(expectedRailOffset - 1, -1, expectedRailOffset + 1, 1)
+  : closedRect(-1, expectedRailOffset - 1, 1, expectedRailOffset + 1);
+const tinyRoads = [
+  geoLine(0, [[-5, -5], [5, -5]]), geoLine(1, [[5, -5], [5, 5]]),
+  geoLine(2, [[5, 5], [-5, 5]]), geoLine(3, [[-5, 5], [-5, -5]]),
+];
+const safeParkRing = closedRect(-120, -120, -100, -100);
+const streamRecords = [
+  ...tinyRoads,
+  geoPolygon(4, 'stream-water', { natural: 'water' }, [[closedRect(100, 100, 120, 120)]]),
+  geoPolygon(5, 'rail-park', { kind: 'park' }, [[railParkRing]]),
+  geoPolygon(6, 'water-park', { kind: 'park' }, [[closedRect(104, 104, 108, 108)]]),
+  geoPolygon(7, 'safe-park', { kind: 'park' }, [[safeParkRing]]),
+  geoPolygon(8, 'reserved-building', { building: 'yes' }, [[railBuildingRing]]),
+];
+const streamConfig = {
+  ...geoConfig, seed: streamSeed, source: 'hybrid', pattern: 'medieval', rail: 'elevated', life: 'high',
+  geography: { records: streamRecords },
+};
+const streamModel = generateCity(streamConfig);
+assert.deepEqual([streamModel.rail.vertical, streamModel.rail.offset], [expectedRailVertical, expectedRailOffset],
+  'hybrid rail uses seed + :hybrid');
+const expectedCbd = [streamRng.float(-80, 80), streamRng.float(-80, 80)];
+assert.deepEqual([streamModel.centers[0].x, streamModel.centers[0].z], expectedCbd,
+  'hybrid fabric uses the rail-advanced seed + :hybrid stream');
+streamRng.float(0, Math.PI);
+const streamRoadPool = [...streamModel.roads, ...streamModel.bridges];
+assert.equal(streamModel.blocks.length, 0, 'stream probe face is too small for procedural fabric draws');
+assert.ok(streamRoadPool.length === 4 && streamRoadPool.every(road => road.len < 14),
+  'stream probe bounds legacy life consumption to one draw per short road pick');
+for (let i = 0; i < 120; i++) streamRng.pick(streamRoadPool);
+for (let i = 0; i < 30 * 2 * 2; i++) streamRng.next();
+const expectedFirstLifeTree = {
+  x: streamRng.float(-120, -100), z: streamRng.float(-120, -100), s: streamRng.float(.65, 1.2),
+};
+assert.deepEqual(streamModel.trees[0], expectedFirstLifeTree,
+  'hybrid life continues the seed + :hybrid stream after rejected unsafe tree probes');
+const cityStream = new RNG(streamSeed + ':city');
+assert.notDeepEqual([streamModel.rail.vertical, streamModel.rail.offset], [cityStream.bool(), cityStream.float(-100, 100)],
+  'hybrid rail does not use seed + :city');
+assert.equal(streamModel.trees.length, 5, 'only the safe imported park receives hybrid life trees');
+for (const tree of streamModel.trees) {
+  assert.ok(pointInPolygon(tree.x, tree.z, safeParkRing) && streamModel.fields.water.sdf(tree.x, tree.z) > .5);
+  assert.equal(streamModel.reserved.some(rect =>
+    tree.x >= rect.x && tree.x <= rect.x + rect.w && tree.z >= rect.z && tree.z <= rect.z + rect.d), false);
+}
+assert.deepEqual(
+  streamModel.geography.diagnostics.filter(diagnostic => diagnostic.code === 'imported-building-reserved'),
+  [{ index: 8, sourceId: 'reserved-building', sourcePart: 0, code: 'imported-building-reserved',
+    message: 'imported building footprint intersects reserved infrastructure' }],
+  'hybrid deterministically rejects an imported building reserved by rail');
+assert.equal(JSON.stringify(generateCity(streamConfig)), JSON.stringify(streamModel),
+  'hybrid reserved-building and tree-safety probe is deterministic');
+
+// A same-seed hybrid control without rail places a procedural park on the
+// corridor that elevated rail later reserves, making park/tree exclusion
+// non-vacuous before asserting the constrained output.
+const railSafetyConfig = { ...hybridConfig, seed: 'rail-2', life: 'high' };
+const railControl = generateCity({ ...railSafetyConfig, rail: 'none' });
+assert.ok(railControl.parks.some(park => !park.imported), 'rail control has a procedural park');
+const railSafetyModel = generateCity({ ...railSafetyConfig, rail: 'elevated' });
+assert.ok(railSafetyModel.parks.some(park => !park.imported),
+  'hybrid rail fixture retains a procedural park');
+assert.ok(railSafetyModel.reserved.length > 0, 'hybrid rail fixture reserves a corridor');
+const reservedParkCandidate = railControl.parks.find(park =>
+  !park.imported && railSafetyModel.reserved.some(rect => polyIntersectsRect(park.polygon, rect)));
+assert.ok(reservedParkCandidate, 'rail control park candidate intersects the reservation');
+const reservedTreeCandidates = railControl.trees.filter(tree =>
+  pointInPolygon(tree.x, tree.z, reservedParkCandidate.polygon));
+assert.ok(reservedTreeCandidates.length > 0, 'rail control has trees on the reserved park candidate');
+assert.equal(
+  railSafetyModel.parks.some(park => !park.imported
+    && polygonsOverlap(park.polygon, reservedParkCandidate.polygon)),
+  false,
+  'hybrid omits the reserved-corridor procedural park candidate',
+);
+assert.equal(
+  reservedTreeCandidates.some(tree =>
+    railSafetyModel.trees.some(other => other.x === tree.x && other.z === tree.z)),
+  false,
+  'hybrid omits trees from the reserved-corridor park candidate',
+);
+assert.ok(railSafetyModel.blocks.some(block => railSafetyModel.reserved.some(rect => polyIntersectsRect(block.polygon, rect))),
+  'hybrid rail probe crosses procedural source faces');
+for (const park of railSafetyModel.parks.filter(entry => !entry.imported)) {
+  assert.equal(railSafetyModel.reserved.some(rect => polyIntersectsRect(park.polygon, rect)), false,
+    'hybrid procedural park excludes rail reservations');
+}
+for (const tree of railSafetyModel.trees) {
+  assert.equal(railSafetyModel.reserved.some(rect =>
+    tree.x >= rect.x && tree.x <= rect.x + rect.w && tree.z >= rect.z && tree.z <= rect.z + rect.d), false,
+  'hybrid tree excludes rail reservations');
+}
+
+assert.ok(hybridModel.cars.length > 0, 'hybrid life places routed cars');
+const hybridEdgeCount = hybridModel.graph.edges.length;
+for (const [carIndex, car] of hybridModel.cars.entries()) {
+  assert.ok(Array.isArray(car.path) && car.path.length > 1, `hybrid car ${carIndex} has no route`);
+  for (const edgeId of car.path) {
+    const edge = hybridModel.graph.edges[edgeId];
+    assert.ok(Number.isInteger(edgeId) && edgeId >= 0 && edgeId < hybridEdgeCount && edge && !edge.removed,
+      `hybrid car ${carIndex} uses a missing imported-graph edge`);
+    assert.ok(Number.isInteger(edge.sourceIndex) && typeof edge.roadId === 'string',
+      `hybrid car ${carIndex} leaves the imported graph`);
+  }
+}
+
+assert.equal(JSON.stringify(generateCity(hybridConfig)), JSON.stringify(hybridModel),
+  'hybrid generation serializes identically on repeat');
+
+const hybridMapCalls = [];
+const hybridMapCtx = new Proxy({
+  beginPath() { hybridMapCalls.push(['begin']); }, moveTo(x, y) { hybridMapCalls.push(['move', x, y]); },
+  lineTo(x, y) { hybridMapCalls.push(['line', x, y]); }, closePath() { hybridMapCalls.push(['close']); },
+  fill(rule) { hybridMapCalls.push(['fill', rule ?? null]); },
+  setLineDash() {}, save() {}, restore() {}, fillRect() {}, stroke() {}, arc() {}, translate() {}, rotate() {}, fillText() {},
+}, { set(target, key, value) { target[key] = value; return true; } });
+drawMap(hybridMapCtx, hybridModel, 200, 200, waterOnly);
+assert.ok(hybridMapCalls.some(call => call[0] === 'fill' && call[1] === 'evenodd'),
+  'hybrid imported water reaches the shared map adapter');
+
+assert.throws(() => generateCity({ ...hybridConfig, geography: { records: [] } }), geoErr);
+assert.throws(() => generateCity({ ...hybridConfig, geography: { records: [geoRecords.at(-1)] } }), geoErr);
+assert.throws(() => generateCity({ ...hybridConfig, geography: { records: [geoLine(0, [[0, 0], [100, 0]])] } }), geoErr);
+assert.throws(() => generateCity({ ...hybridConfig, geography: null }), TypeError);
+assert.throws(() => generateCity({ ...hybridConfig, engine: 'bsp' }), /graph engine/);
+
+assert.equal(JSON.stringify(generateCity(geoConfig)), geographicBeforeHybrid, 'geographic output changed after hybrid');
+assert.equal(JSON.stringify(generateCity(proceduralGraphConfig)), proceduralGraphBeforeHybrid, 'procedural graph output changed after hybrid');
+assert.equal(JSON.stringify(generateCity(bspCompatConfig)), bspBeforeHybrid, 'BSP output changed after hybrid');
+assert.equal(JSON.stringify(generateCity(proceduralConfig)), JSON.stringify(proceduralAfter),
+  'source-omitted procedural output changed after hybrid');
 
 console.log(JSON.stringify({
   tests: 'geography',
