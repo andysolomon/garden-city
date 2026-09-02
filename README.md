@@ -93,15 +93,42 @@ directly.
 
 `generateCity({ source: 'geographic', geography: { records, diagnostics? }, ... })`
 builds the city from imported roads instead of procedural road growth. It stays
-synchronous and seeded. Line records are roads, polygon records are water, and
-the graph engine's fabric pipeline (faces → blocks → parcels → frontage →
-buildings) runs unchanged on the imported graph, so every rendered road or
+synchronous and seeded. Line records are roads. Normalized polygon records are
+classified in this order: a `kind: 'building'` or truthy `building` tag is a
+building, where false-like values (`false`, `0`, `off`, `no`, and empty, as
+primitives or strings) count as disabled tags; `kind: 'park'` or non-water
+`landuse`/`leisure` is park/land use; explicit water tags (same false-like
+rule) and all unclassified polygons are water. The final
+fallback preserves the prior untagged-polygon-as-water contract. The graph
+engine's fabric pipeline (faces → blocks → parcels → frontage → buildings)
+runs on the imported graph, so every rendered road or
 bridge carries `edge` provenance back to `model.graph.edges[i].sourceIndex`,
 `sourceId`, `sourcePart`, and `roadId`. At-grade edges render as roads,
 bridges/elevated edges render as bridges, and tunnels/below-grade edges stay in
 `model.graph` and `model.corridors` as routing data without surface roads or
 caps. Imported polygon water renders with holes in map, ink, and solid as
-`model.water` entries `{ type: 'imported', polygon, holes, sourceIndex, sourceId }`.
+`model.water` entries `{ type: 'imported', polygon, holes, sourceIndex, sourceId, sourcePart }`.
+Each building `MultiPolygon` component becomes one `model.buildings` entry with
+`footprint`, the first hole as `courtyard`, rectangle-compatible
+`x/z/w/d/cx/cz/angle`, and `sourceIndex`/`sourceId`/`sourcePart`. A finite
+positive `height` wins, then a finite positive `building:levels * 3` product
+(an overflow to `Infinity` falls through to the fallback); otherwise a
+stable source-identity/index/part hash supplies the height without consuming
+city RNG. Imported park and land-use components become polygon `model.parks`
+entries with the same provenance and a `landUse` marker; the default-visible
+PARKS map layer, ink ground fill, and solid ground mesh all consume them.
+
+Imported buildings are accepted only when their complete outer footprint is on
+land and misses every reserved rectangle. A building or park outer ring with
+non-positive area or a non-simple (self-intersecting) ring is omitted up front
+with a deterministic `imported-building-geometry` or `imported-park-geometry`
+diagnostic instead of becoming a model entry. Other rejections are
+deterministic `model.geography.diagnostics` entries with codes
+`imported-building-water` or `imported-building-reserved`. Accepted imported
+buildings and parks claim their polygons before procedural geographic massing
+is accepted, so generated buildings cannot overlap them. This claim filtering
+is geographic-only. Source records and rings are copied rather than mutated.
+
 The full numeric importer counters, including diagnostics and derived
 bridge/elevated counts, are available at `model.stats.import`; the top-level
 `nodes`, `edges`, `faces`, and `corridors` counters used by the UI remain
@@ -115,8 +142,8 @@ when elevated and are hidden from the surface while below grade. Empty,
 polygon-only, or otherwise faceless road data throws a recoverable
 `geographic source has no usable road faces (...)` error; the next call works
 normally. Configs without `source: 'geographic'` follow the procedural graph or
-BSP paths unchanged. Hybrid mode, imported buildings/parks, provider loading, and
-UI controls remain deferred.
+BSP paths unchanged. Hybrid mode, provider loading, geocoding UI, caching, and
+arbitrary park-hole rendering remain deferred.
 
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 

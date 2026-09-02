@@ -10,7 +10,7 @@ import { ELEVATION_MAX } from './fields.js';
 export const LAYERS = [
   ['water', 'WATER', true], ['elevation', 'ELEVATION', false], ['population', 'POPULATION', false], ['direction', 'DIRECTION', false],
   ['faces', 'FACES', true], ['blocks', 'BUILDABLE', false], ['parcels', 'PARCELS', true],
-  ['buildings', 'BUILDINGS', true], ['edges', 'EDGES', true], ['nodes', 'NODES', false],
+  ['parks', 'PARKS', true], ['buildings', 'BUILDINGS', true], ['edges', 'EDGES', true], ['nodes', 'NODES', false],
   ['spurs', 'SPURS', true], ['labels', 'LABELS', false], ['reserved', 'RESERVED', true],
   ['walkshed', 'WALKSHED', true], ['traffic', 'TRAFFIC', false],
 ];
@@ -112,9 +112,11 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
   if (on('blocks')) {
     ctx.strokeStyle = '#8aa07a'; ctx.lineWidth = 1;
     for (const b of model.blocks) for (const poly of b.buildablePieces || (b.buildable ? [b.buildable] : [])) { path(poly); ctx.stroke(); }
-    ctx.fillStyle = 'rgba(138,160,122,.35)';
-    for (const p of model.parks) { path(p.polygon); ctx.fill(); }
     for (const p of model.plazas) { ctx.fillStyle = 'rgba(232,80,30,.25)'; path(p.polygon); ctx.fill(); }
+  }
+  if (on('parks')) {
+    ctx.fillStyle = dark ? 'rgba(87,110,81,.48)' : 'rgba(138,160,122,.42)';
+    for (const p of model.parks) { path(p.polygon); ctx.fill(); }
   }
   if (on('parcels')) {
     ctx.lineWidth = .7;
@@ -132,6 +134,15 @@ export function drawMap(ctx, model, w, h, layers, view = null, theme = 'day') {
     ctx.fillStyle = dark ? 'rgba(216,212,200,.75)' : 'rgba(28,26,24,.72)';
     for (const b of model.buildings) {
       if (b.y) continue;
+      if (b.footprint) {
+        ctx.beginPath();
+        for (const ring of [b.footprint, ...(b.courtyard ? [b.courtyard] : [])]) {
+          ring.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Z(p[1])) : ctx.moveTo(X(p[0]), Z(p[1])));
+          ctx.closePath();
+        }
+        ctx.fill('evenodd');
+        continue;
+      }
       ctx.save();
       ctx.translate(X(b.cx), Z(b.cz)); ctx.rotate(b.angle || 0);
       ctx.fillRect(-b.w / 2 * v.scale, -b.d / 2 * v.scale, b.w * v.scale, b.d * v.scale);

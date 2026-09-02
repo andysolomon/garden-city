@@ -1,0 +1,34 @@
+W-000006 Render real building footprints and land use
+Generated: 2026-09-02 09:45:24 EDT
+Plan: docs/W-000006-IMPLEMENTATION_PLAN.md
+Issue: #41
+Branch: feat/W-000006-render-real-building-footprints
+On merge: move docs/W-000006-IMPLEMENTATION_PLAN.md and docs/W-000006-progress.txt to docs/archive/.
+
+[x] 1.0 Classify and adapt geographic polygons
+    [x] 1.1 Add deterministic building/park/land-use/water classification
+    [x] 1.2 Preserve provenance, courtyard rings, bbox fields, and source heights
+    [x] 1.3 Add levels-derived and source-identity fallback heights
+
+[x] 2.0 Reconcile imported and procedural fabric
+    [x] 2.1 Reject imported footprints crossing water or reserved rectangles with diagnostics
+    [x] 2.2 Prevent generated buildings from overlapping accepted imported buildings/parks
+    [x] 2.3 Preserve geographic determinism and non-geographic RNG behavior
+
+[x] 3.0 Complete map and renderer integration
+    [x] 3.1 Draw polygon/courtyard buildings in map mode with rectangle fallback
+    [x] 3.2 Add a default-visible parks/land-use map layer
+    [x] 3.3 Confirm existing ink and solid polygon paths consume imported model entries
+
+[x] 4.0 Verify and document
+    [x] 4.1 Extend test/geography.mjs fixture and geometry invariants
+    [x] 4.2 Run node test/geography.mjs and node test/roadgraph-import.mjs
+    [x] 4.3 Run npm test
+    [x] 4.4 Headless Chromium fixture observed and exported valid temporary PNGs: map 1200x757, ink 1654x2339, solid 1200x757; imported source/levels/fallback buildings and park/land-use entries were present; binaries removed after inspection
+    [x] 4.5 Document the geographic polygon/height contract in README.md
+    [x] 4.6 Remediate verification defects: validate finite levels-derived heights, treat false-like building/water tags as disabled, reject zero-area/non-simple imported building/park rings with deterministic diagnostics, synchronize top-level/geography/import diagnostic counters after imported-feature rejections (src/fabric.js), and restore the parks layer in contact.html thumbnails; regression assertions added in test/geography.mjs
+
+[ ] 5.0 Ship PR
+    [x] 5.1 Commit issue-scoped files with Conventional Commits and Closes #41
+    [x] 5.2 Push branch and open PR #49 in --ship pr mode
+    [ ] 5.3 After merge, move plan/progress to docs/archive/ and remove the worktree

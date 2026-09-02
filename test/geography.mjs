@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   EARTH_RADIUS_M,
   VIEWPORT_SIZE,
@@ -15,10 +16,10 @@ import { normalizeGeoJSON, SUPPORTED_GEOMETRY_TYPES } from '../src/geojson.js';
 import { makeImportedWater, makeWater } from '../src/fields.js';
 import { graphFabric } from '../src/fabric.js';
 import { generateCity } from '../src/model.js';
-import { drawMap } from '../src/map.js';
+import { drawMap, LAYERS } from '../src/map.js';
 import { positionOnRoute, routeCarPlacement } from '../src/routing.js';
-import { RNG } from '../src/rng.js';
-import { centroid, isSimple, orientedRect, pointInPolygon } from '../src/geom.js';
+import { RNG, hashSeed } from '../src/rng.js';
+import { area, bbox, centroid, isSimple, orientedRect, pointInPolygon, segIntersect } from '../src/geom.js';
 
 const DEG_TO_RAD = Math.PI / 180;
 const metresPerDegree = EARTH_RADIUS_M * DEG_TO_RAD;
@@ -1054,6 +1055,189 @@ for (const key of ['faces', 'spurs', 'droppedEdges', 'degenerateFaces', 'offsetD
 }
 assert.equal(JSON.stringify(generateCity(geoConfig)), JSON.stringify(geoModel), 'geographic generation is deterministic');
 
+// --- W-000006: classified source footprints and land use ------------------
+const geoPolygon = (index, sourceId, properties, polygons) => ({
+  index, sourceId, properties, geometry: { type: 'polygon', polygons },
+});
+const footprintRecords = [
+  ...geoRecords,
+  geoPolygon(10, 'height-building', { kind: 'building', natural: 'water', height: '27.5', 'building:levels': 99 }, [[closedRect(-140, -140, -128, -128)]]),
+  geoPolygon(11, 'levels-building', { building: 'yes', 'building:levels': '4' }, [[closedRect(-115, -140, -100, -128)]]),
+  geoPolygon(12, 0, { building: 'apartments' }, [
+    [closedRect(-140, -115, -125, -100), closedRect(-136, -111, -129, -104)],
+    [closedRect(-118, -115, -105, -100)],
+  ]),
+  geoPolygon(13, 'source-park', { kind: 'park', water: 'yes' }, [[closedRect(-90, -140, -70, -120)]]),
+  geoPolygon(14, 'source-landuse', { landuse: 'industrial' }, [[closedRect(-90, -110, -70, -90)]]),
+  geoPolygon(15, 'tagged-water', { natural: 'water' }, [[closedRect(70, 70, 90, 90)]]),
+  geoPolygon(16, 'water-building', { building: true }, [[closedRect(75, 75, 85, 85)]]),
+];
+const footprintSnapshot = JSON.stringify(footprintRecords);
+const footprintConfig = {
+  ...geoConfig, seed: 'geo-footprints', geography: { records: footprintRecords, diagnostics: [{ code: 'upstream-note' }] },
+};
+const footprintModel = generateCity(footprintConfig);
+assert.equal(JSON.stringify(footprintRecords), footprintSnapshot, 'geographic generation mutated source records');
+const importedBuildings = footprintModel.buildings.filter(building => building.imported);
+const importedParks = footprintModel.parks.filter(park => park.imported);
+assert.deepEqual(importedBuildings.map(building => [building.sourceIndex, building.sourceId, building.sourcePart]), [
+  [10, 'height-building', 0], [11, 'levels-building', 0], [12, 0, 0], [12, 0, 1],
+]);
+assert.deepEqual(importedParks.map(park => [park.sourceIndex, park.sourceId, park.sourcePart, park.landUse]), [
+  [13, 'source-park', 0, 'park'], [14, 'source-landuse', 0, 'industrial'],
+]);
+assert.equal(footprintModel.water.length, 2, 'only unclassified and explicitly tagged water become water');
+assert.deepEqual(footprintModel.water.map(water => water.sourceId), ['lake', 'tagged-water']);
+
+const sourceHeightBuilding = importedBuildings.find(building => building.sourceId === 'height-building');
+const levelsHeightBuilding = importedBuildings.find(building => building.sourceId === 'levels-building');
+const fallbackBuildings = importedBuildings.filter(building => building.sourceId === 0);
+assert.equal(sourceHeightBuilding.h, 27.5);
+assert.equal(levelsHeightBuilding.h, 12);
+assert.deepEqual(fallbackBuildings.map(building => building.h), [33, 27], 'fallback height is source-identity/part stable');
+assert.deepEqual(sourceHeightBuilding.footprint, closedRect(-140, -140, -128, -128).slice(0, -1));
+assert.deepEqual(
+  { x: sourceHeightBuilding.x, z: sourceHeightBuilding.z, w: sourceHeightBuilding.w, d: sourceHeightBuilding.d,
+    cx: sourceHeightBuilding.cx, cz: sourceHeightBuilding.cz, angle: sourceHeightBuilding.angle, y: sourceHeightBuilding.y },
+  { x: -140, z: -140, w: 12, d: 12, cx: -134, cz: -134, angle: 0, y: 0 },
+  'imported polygon buildings retain rectangle compatibility fields',
+);
+assert.deepEqual(fallbackBuildings[0].courtyard, closedRect(-136, -111, -129, -104).slice(0, -1));
+assert.equal(fallbackBuildings[1].courtyard, undefined, 'each MultiPolygon component becomes its own building');
+assert.deepEqual(
+  footprintModel.geography.diagnostics.filter(diagnostic => diagnostic.code.startsWith('imported-building-')),
+  [{ index: 16, sourceId: 'water-building', sourcePart: 0, code: 'imported-building-water',
+    message: 'imported building footprint is not fully on land' }],
+);
+assert.equal(footprintModel.geography.stats.diagnostics, footprintModel.geography.diagnostics.length);
+assert.equal(footprintModel.stats.import.diagnostics, footprintModel.geography.diagnostics.length);
+assert.equal(footprintModel.stats.diagnostics, footprintModel.geography.diagnostics.length,
+  'top-level stats stay synchronized with imported-feature rejections');
+assert.equal(JSON.stringify(generateCity(footprintConfig)), JSON.stringify(footprintModel),
+  'classified geographic generation serializes identically on repeat');
+
+function polygonsOverlap(a, b) {
+  const aa = bbox(a), bb = bbox(b);
+  if (!(aa.x < bb.x + bb.w && aa.x + aa.w > bb.x && aa.z < bb.z + bb.d && aa.z + aa.d > bb.z)) return false;
+  for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
+    const p = a[i], q = a[(i + 1) % a.length], r = b[j], s = b[(j + 1) % b.length];
+    if (segIntersect(p[0], p[1], q[0], q[1], r[0], r[1], s[0], s[1])) return true;
+  }
+  return pointInPolygon(a[0][0], a[0][1], b) || pointInPolygon(b[0][0], b[0][1], a);
+}
+
+const sourceClaims = [...importedBuildings.map(building => building.footprint), ...importedParks.map(park => park.polygon)];
+const generatedBuildings = footprintModel.buildings.filter(building => !building.imported);
+assert.ok(generatedBuildings.length > 0, 'claim fixture retains procedural geographic massing');
+for (const [buildingIndex, building] of generatedBuildings.entries()) {
+  const footprint = building.footprint || orientedRect(building.cx, building.cz, building.w, building.d, building.angle || 0);
+  for (const [claimIndex, claim] of sourceClaims.entries()) {
+    assert.equal(polygonsOverlap(footprint, claim), false,
+      `generated building ${buildingIndex} overlaps imported claim ${claimIndex}`);
+  }
+}
+
+// Rail planning precedes source acceptance, so its deterministic corridor can
+// be used to prove exact reserved-rectangle rejection without source RNG draws.
+const railProbe = generateCity({ ...geoConfig, seed: 'geo-reserved', rail: 'elevated' });
+const corridor = railProbe.reserved[0];
+const reservedFootprint = closedRect(
+  corridor.x + corridor.w / 2 - 4, corridor.z + corridor.d / 2 - 4,
+  corridor.x + corridor.w / 2 + 4, corridor.z + corridor.d / 2 + 4,
+);
+const reservedRecord = geoPolygon(10, 'reserved-building', { building: 'yes' }, [[reservedFootprint]]);
+const reservedModel = generateCity({
+  ...geoConfig, seed: 'geo-reserved', rail: 'elevated',
+  geography: { records: [...geoRecords, reservedRecord] },
+});
+assert.equal(reservedModel.buildings.some(building => building.sourceId === 'reserved-building'), false);
+assert.deepEqual(
+  reservedModel.geography.diagnostics.filter(diagnostic => diagnostic.code === 'imported-building-reserved'),
+  [{ index: 10, sourceId: 'reserved-building', sourcePart: 0, code: 'imported-building-reserved',
+    message: 'imported building footprint intersects reserved infrastructure' }],
+);
+assert.equal(reservedModel.geography.stats.diagnostics, reservedModel.geography.diagnostics.length,
+  'geography stats stay synchronized with reserved-rectangle rejections');
+assert.equal(reservedModel.stats.import.diagnostics, reservedModel.geography.diagnostics.length,
+  'import stats stay synchronized with reserved-rectangle rejections');
+assert.equal(reservedModel.stats.diagnostics, reservedModel.geography.diagnostics.length,
+  'top-level stats stay synchronized with reserved-rectangle rejections');
+
+// --- W-000006 remediation: finite levels heights, false-like tags, ring validity ---
+const zeroAreaRing = closedRect(-115, -115, -75, -115).slice(0, -1);
+const buildingBowtie = [[-60, -85], [-52, -77], [-52, -93], [-60, -77], [-60, -85]].slice(0, -1);
+const parkBowtie = [[-10, -85], [-2, -77], [-2, -93], [-10, -77], [-10, -85]].slice(0, -1);
+assert.equal(area(zeroAreaRing), 0, 'zero-area fixture ring is degenerate');
+assert.ok(area(buildingBowtie) > 0 && !isSimple(buildingBowtie), 'building fixture ring is non-simple with positive area');
+assert.ok(area(parkBowtie) > 0 && !isSimple(parkBowtie), 'park fixture ring is non-simple with positive area');
+
+const remediationRecords = [
+  ...geoRecords,
+  geoPolygon(10, 'huge-levels', { building: 'yes', 'building:levels': '1e308' }, [[closedRect(-140, -140, -128, -128)]]),
+  geoPolygon(11, 'max-levels', { building: 'yes', 'building:levels': Number.MAX_VALUE }, [[closedRect(-115, -140, -100, -128)]]),
+  geoPolygon(12, 'finite-huge-levels', { building: 'yes', 'building:levels': '1e307' }, [[closedRect(-90, -140, -75, -128)]]),
+  geoPolygon(13, 'false-string-building', { building: 'false', landuse: 'grass' }, [[closedRect(-40, -140, -25, -128)]]),
+  geoPolygon(14, 'zero-string-building', { building: '0' }, [[closedRect(-10, -140, 10, -128)]]),
+  geoPolygon(15, 'off-building', { building: 'off', landuse: 'cemetery' }, [[closedRect(25, -140, 40, -128)]]),
+  geoPolygon(16, 'false-water-landuse', { landuse: 'grass', water: '0' }, [[closedRect(25, -115, 40, -100)]]),
+  geoPolygon(17, 'false-boolean-building', { building: false, landuse: 'recreation_ground' }, [[closedRect(-40, -100, -25, -85)]]),
+  geoPolygon(18, 'yes-building', { building: 'yes', height: '9' }, [[closedRect(-140, -115, -128, -100)]]),
+  geoPolygon(19, 'zero-area-building', { building: 'yes' }, [[closedRect(-115, -115, -75, -115)]]),
+  geoPolygon(20, 'nonsimple-building', { building: 'yes' }, [[buildingBowtie.concat([buildingBowtie[0].slice()])]]),
+  geoPolygon(21, 'zero-area-park', { kind: 'park' }, [[closedRect(-40, -115, -25, -115)]]),
+  geoPolygon(22, 'nonsimple-park', { kind: 'park' }, [[parkBowtie.concat([parkBowtie[0].slice()])]]),
+];
+const remediationSnapshot = JSON.stringify(remediationRecords);
+const remediationConfig = {
+  ...geoConfig, seed: 'geo-remediation',
+  geography: { records: remediationRecords, diagnostics: [{ code: 'upstream-note' }] },
+};
+const remediationModel = generateCity(remediationConfig);
+assert.equal(JSON.stringify(remediationRecords), remediationSnapshot, 'remediation fixture mutated source records');
+const remediationBuildings = remediationModel.buildings.filter(building => building.imported);
+const remediationParks = remediationModel.parks.filter(park => park.imported);
+assert.ok(remediationModel.buildings.every(building => Number.isFinite(building.h) && building.h > 0),
+  'every model building height is finite and positive');
+assert.deepEqual(remediationBuildings.map(building => building.sourceId),
+  ['huge-levels', 'max-levels', 'finite-huge-levels', 'yes-building'],
+  'false-like and geometry-invalid building records create no buildings');
+assert.equal(remediationBuildings.find(building => building.sourceId === 'finite-huge-levels').h,
+  Number('1e307') * 3, 'a finite huge levels-derived height is still accepted');
+assert.equal(remediationBuildings.find(building => building.sourceId === 'huge-levels').h,
+  12 + hashSeed('huge-levels|10|0') % 25, 'overflowing levels-derived heights fall back to the stable identity hash');
+assert.equal(remediationBuildings.find(building => building.sourceId === 'max-levels').h,
+  12 + hashSeed('max-levels|11|0') % 25);
+assert.equal(remediationBuildings.find(building => building.sourceId === 'yes-building').h, 9,
+  'truthy building tags still classify and keep source heights');
+assert.deepEqual(remediationParks.map(park => [park.sourceId, park.landUse]), [
+  ['false-string-building', 'grass'], ['off-building', 'cemetery'],
+  ['false-water-landuse', 'grass'], ['false-boolean-building', 'recreation_ground'],
+], 'false-like building/water tags do not override valid land-use classification');
+assert.deepEqual(remediationModel.water.map(water => water.sourceId), ['lake', 'zero-string-building'],
+  'a false-like unclassified building tag falls back to water, not a building');
+assert.deepEqual(
+  remediationModel.geography.diagnostics.filter(diagnostic => diagnostic.code.endsWith('-geometry')),
+  [
+    { index: 19, sourceId: 'zero-area-building', sourcePart: 0, code: 'imported-building-geometry',
+      message: 'imported building outer ring has non-positive area' },
+    { index: 20, sourceId: 'nonsimple-building', sourcePart: 0, code: 'imported-building-geometry',
+      message: 'imported building outer ring is not simple' },
+    { index: 21, sourceId: 'zero-area-park', sourcePart: 0, code: 'imported-park-geometry',
+      message: 'imported park outer ring has non-positive area' },
+    { index: 22, sourceId: 'nonsimple-park', sourcePart: 0, code: 'imported-park-geometry',
+      message: 'imported park outer ring is not simple' },
+  ],
+  'invalid imported building/park rings are omitted with deterministic type-specific diagnostics',
+);
+assert.equal(remediationModel.geography.stats.diagnostics, remediationModel.geography.diagnostics.length,
+  'geography stats stay synchronized with ring rejections');
+assert.equal(remediationModel.stats.import.diagnostics, remediationModel.geography.diagnostics.length,
+  'import stats stay synchronized with ring rejections');
+assert.equal(remediationModel.stats.diagnostics, remediationModel.geography.diagnostics.length,
+  'top-level stats stay synchronized with ring rejections');
+assert.equal(JSON.stringify(generateCity(remediationConfig)), JSON.stringify(remediationModel),
+  'remediation fixture generation serializes identically on repeat');
+
 // Authoritative imported water rejects an untagged surface road instead of
 // clipping or silently promoting it. The same source span is valid when its
 // metadata explicitly marks a bridge or a positive level.
@@ -1144,6 +1328,45 @@ assert.equal(waterPath.filter(c => c[0] === 'move').length, 2, 'outer ring and h
 assert.equal(waterPath.filter(c => c[0] === 'close').length, 2);
 assert.equal(waterPath.filter(c => c[0] === 'line').length, 6);
 assert.deepEqual(canvasCalls[waterFill], ['fill', 'evenodd']);
+
+// Polygon/courtyard buildings and imported parks have independent default map
+// layers, while rectangle-only buildings retain the compatibility fallback.
+assert.equal(LAYERS.find(([key]) => key === 'parks')[2], true);
+const mapCalls = [];
+const mapCtx = new Proxy({
+  beginPath() { mapCalls.push(['begin']); }, moveTo(x, y) { mapCalls.push(['move', x, y]); },
+  lineTo(x, y) { mapCalls.push(['line', x, y]); }, closePath() { mapCalls.push(['close']); },
+  fill(rule) { mapCalls.push(['fill', rule ?? null]); }, fillRect(...args) { mapCalls.push(['fillRect', ...args]); },
+  setLineDash() {}, save() {}, restore() {}, stroke() {}, arc() {}, translate() {}, rotate() {}, fillText() {},
+}, { set(target, key, value) { target[key] = value; return true; } });
+const mapFixture = {
+  size: 100, fields: null, graph: null, water: [], reserved: [], faces: [], blocks: [], parcels: [], plazas: [], centers: null,
+  parks: [{ polygon: closedRect(-40, -40, -20, -20).slice(0, -1), imported: true, landUse: 'park' }],
+  buildings: [
+    { footprint: closedRect(-10, -10, 10, 10).slice(0, -1), courtyard: closedRect(-4, -4, 4, 4).slice(0, -1), y: 0 },
+    { cx: 30, cz: 30, w: 10, d: 8, angle: 0, y: 0 },
+  ],
+};
+const mapLayers = Object.fromEntries(LAYERS.map(([key]) => [key, key === 'parks' || key === 'buildings']));
+drawMap(mapCtx, mapFixture, 200, 200, mapLayers);
+const evenOddFill = mapCalls.findIndex(call => call[0] === 'fill' && call[1] === 'evenodd');
+assert.ok(evenOddFill >= 0, 'polygon building uses an even-odd map fill');
+const buildingPath = mapCalls.slice(mapCalls.map(call => call[0]).lastIndexOf('begin', evenOddFill) + 1, evenOddFill);
+assert.equal(buildingPath.filter(call => call[0] === 'move').length, 2, 'building outer and courtyard start separate subpaths');
+assert.equal(buildingPath.filter(call => call[0] === 'close').length, 2);
+assert.ok(mapCalls.some(call => call[0] === 'fill' && call[1] === null), 'imported park traces a filled polygon path');
+assert.equal(mapCalls.filter(call => call[0] === 'fillRect').length, 2,
+  'map background and rectangle building use fillRect fallback');
+
+// Contact-sheet thumbnails pin an explicit layer selection; parks must be
+// enabled there alongside the thumbnail's existing block/map layers.
+const contactSource = readFileSync(new URL('../contact.html', import.meta.url), 'utf8');
+const contactSelection = contactSource.match(/LAYERS\.map\(\(\[k\]\) => \[k, \[([^\]]*)\]\.includes\(k\)\]\)/);
+assert.ok(contactSelection, 'contact.html pins an explicit thumbnail layer selection');
+const contactKeys = contactSelection[1].split(',').map(key => key.trim().replaceAll('\'', '')).filter(Boolean);
+for (const key of ['water', 'parks', 'blocks', 'buildings', 'edges', 'spurs']) {
+  assert.ok(contactKeys.includes(key), `contact thumbnails enable the ${key} layer`);
+}
 
 // Unusable geographic road data throws a clear, recoverable error.
 const geoErr = /geographic source has no usable road faces/;

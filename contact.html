@@ -30,7 +30,7 @@
   import { generateCity } from './src/model.js';
   import { drawMap, LAYERS } from './src/map.js';
   const $ = id => document.getElementById(id);
-  const layers = Object.fromEntries(LAYERS.map(([k]) => [k, ['water', 'buildings', 'edges', 'spurs', 'blocks'].includes(k)]));
+  const layers = Object.fromEntries(LAYERS.map(([k]) => [k, ['water', 'parks', 'buildings', 'edges', 'spurs', 'blocks'].includes(k)]));
   const PATTERNS = ['manhattan', 'paris', 'tokyo', 'medieval', 'atlanta'];
   function render() {
     const grid = $('grid'); grid.innerHTML = '';
