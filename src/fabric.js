@@ -160,6 +160,7 @@ function buildFabric(model, land, rng, config, buildGraph) {
   // Source fabric is accepted before procedural massing. Only geographic land
   // carries these entries, keeping every procedural graph/BSP path untouched.
   const claimed = [];
+  const importedBuildingClaims = [];
   if (land.imported) {
     // Rings rejected at the model boundary are reported alongside the fabric's
     // own water/reserved rejections; the stats sync below covers both.
@@ -186,6 +187,7 @@ function buildFabric(model, land, rng, config, buildGraph) {
       }
       model.buildings.push(building);
       claimed.push(building.footprint);
+      importedBuildingClaims.push(building.footprint);
     }
     model.geography.stats.diagnostics = model.geography.diagnostics.length;
     model.stats.import.diagnostics = model.geography.diagnostics.length;
@@ -263,7 +265,10 @@ function buildFabric(model, land, rng, config, buildGraph) {
   const targetParcelBase = dcfg.parcel * dcfg.parcel * P.parcelScale;
   for (const b of blocksRaw) {
     model.blocks.push(b);
-    if (b.field) { model.parks.push({ polygon: b.polygon, field: true, ...bbox(b.polygon) }); continue; }
+    if (b.field) {
+      if (proceduralParkAllowed(b.polygon)) model.parks.push({ polygon: b.polygon, field: true, ...bbox(b.polygon) });
+      continue;
+    }
     if (!b.buildable) continue;
     if (b.landmark) { makePlaza(b); continue; }
     const parkChance = dcfg.park + (b.zone === 'civic' ? .08 : 0);
@@ -291,17 +296,18 @@ function buildFabric(model, land, rng, config, buildGraph) {
       const c = Math.cos(o.angle), s = Math.sin(o.angle);
       const u = Math.cos(t) * o.w * .42, v = Math.sin(t) * o.d * .42;
       const x = o.cx + u * c - v * s, z = o.cz + u * s + v * c;
-      if (pointInPolygon(x, z, poly)) model.trees.push({ x, z, s: rng.float(.8, 1.2) });
+      if (pointInPolygon(x, z, poly) && proceduralTreeAllowed(x, z)) model.trees.push({ x, z, s: rng.float(.8, 1.2) });
     }
   }
 
   function addPark(b) {
-    const pieces = buildablePieces(b), total = pieces.reduce((sum, piece) => sum + area(piece), 0);
+    const pieces = buildablePieces(b).filter(proceduralParkAllowed);
+    const total = pieces.reduce((sum, piece) => sum + area(piece), 0);
     for (const poly of pieces) {
       model.parks.push({ polygon: poly, ...bbox(poly) });
       const count = pieces.length === 1 ? Math.max(4, Math.floor(b.area / 2600))
         : Math.max(2, Math.floor(b.area / 2600 * area(poly) / total));
-      scatterTrees(poly, count, rng, model, [.7, 1.35]);
+      scatterTrees(poly, count, rng, model, [.7, 1.35], proceduralTreeAllowed);
     }
   }
 
@@ -372,7 +378,11 @@ function buildFabric(model, land, rng, config, buildGraph) {
         if (!footprintOnLand(poly)) continue;
         const parcel = { polygon: poly, zone: b.zone, dist: b.dist, pop: b.pop, frontage: fr, landlocked: !fr, block: b, ...bbox(poly) };
         model.parcels.push(parcel);
-        if (!fr) { model.stats.landlocked++; model.parks.push({ polygon: poly, court: true, ...bbox(poly) }); continue; }
+        if (!fr) {
+          model.stats.landlocked++;
+          if (proceduralParkAllowed(poly)) model.parks.push({ polygon: poly, court: true, ...bbox(poly) });
+          continue;
+        }
         // Reserved corridors take their right-of-way out of the lot.
         let usable = poly;
         for (const r of model.reserved) { usable = trimPolyAgainstRect(usable, r); if (!usable) break; }
@@ -398,7 +408,9 @@ function buildFabric(model, land, rng, config, buildGraph) {
 
   function courtyardFallback(parcel) {
     parcel.fallback = 'courtyard';
-    model.parks.push({ polygon: parcel.polygon, court: true, fallback: 'courtyard', ...bbox(parcel.polygon) });
+    if (proceduralParkAllowed(parcel.polygon)) {
+      model.parks.push({ polygon: parcel.polygon, court: true, fallback: 'courtyard', ...bbox(parcel.polygon) });
+    }
   }
 
   // A face centroid can be on land while an inset edge still crosses a river
@@ -477,6 +489,22 @@ function buildFabric(model, land, rng, config, buildGraph) {
     return claimed.length > 0 && claimed.some(other => polygonsIntersect(poly, other));
   }
 
+  // Geographic output predates these open-space constraints. Hybrid alone
+  // treats imported claims, water, and infrastructure as authoritative for
+  // procedural parks and for every tree produced during fabric generation.
+  function proceduralParkAllowed(poly) {
+    return config.source !== 'hybrid' || (footprintOnLand(poly)
+      && !model.reserved.some(rect => polyIntersectsRect(poly, rect))
+      && !overlapsClaimed(poly));
+  }
+
+  function proceduralTreeAllowed(x, z) {
+    if (config.source !== 'hybrid') return true;
+    if (!(water.sdf(x, z) > .5)) return false;
+    if (model.reserved.some(rect => x >= rect.x && x <= rect.x + rect.w && z >= rect.z && z <= rect.z + rect.d)) return false;
+    return !importedBuildingClaims.some(poly => pointInPolygon(x, z, poly));
+  }
+
   function buildablePieces(block) {
     return block.buildablePieces || (block.buildable ? [block.buildable] : []);
   }
@@ -495,12 +523,12 @@ function polygonsIntersect(a, b) {
   return pointInPolygon(a[0][0], a[0][1], b) || pointInPolygon(b[0][0], b[0][1], a);
 }
 
-export function scatterTrees(poly, n, rng, model, sRange) {
+export function scatterTrees(poly, n, rng, model, sRange, accept = () => true) {
   const b = bbox(poly);
   let placed = 0, tries = 0;
   while (placed < n && tries++ < n * 12) {
     const x = rng.float(b.x + 4, b.x + b.w - 4), z = rng.float(b.z + 4, b.z + b.d - 4);
-    if (!pointInPolygon(x, z, poly)) continue;
+    if (!pointInPolygon(x, z, poly) || !accept(x, z)) continue;
     model.trees.push({ x, z, s: rng.float(sRange[0], sRange[1]) });
     placed++;
   }
