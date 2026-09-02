@@ -12,6 +12,6 @@ On completion, move this file and the plan to docs/archive/.
     [x] 3.1 - Wire the geography harness into npm test
     [x] 3.2 - Document the public module and coordinate convention in README.md
     [x] 3.3 - Verify procedural generation remains unchanged
-[ ] 4.0 - Ship & archive
-    [ ] 4.1 - Verify / open shipping PR
-    [ ] 4.2 - On merge: move docs/W-000001-IMPLEMENTATION_PLAN.md + docs/W-000001-progress.txt to docs/archive/
+[x] 4.0 - Ship & archive
+    [x] 4.1 - Verify / open shipping PR
+    [x] 4.2 - After merge: moved plan/progress to docs/archive/

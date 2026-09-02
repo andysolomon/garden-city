@@ -26,6 +26,6 @@ Updated: 2026-09-01
     [x] 4.5 - Document the geographic config and error contract
     [x] 4.6 - Cover bridge/elevated/below-grade route flags and moving-car placement/visibility
     [x] 4.7 - Confirm procedural graph and BSP CityModel JSON are byte-identical to HEAD
-[ ] 5.0 - Ship & archive
-    [ ] 5.1 - Open a scoped PR that closes #40
-    [ ] 5.2 - On merge: move docs/W-000005-IMPLEMENTATION_PLAN.md + docs/W-000005-progress.txt to docs/archive/
+[x] 5.0 - Ship & archive
+    [x] 5.1 - Open a scoped PR that closes #40
+    [x] 5.2 - After merge: moved plan/progress to docs/archive/
