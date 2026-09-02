@@ -1,6 +1,6 @@
 W-000007 Add hybrid geographic and procedural mode - Progress
 Generated: 2026-09-02 13:34:22 EDT
-Plan: docs/W-000007-IMPLEMENTATION_PLAN.md
+Plan: docs/archive/W-000007-IMPLEMENTATION_PLAN.md
 Issue: #42
 Branch: feat/W-000007-add-hybrid-geographic-procedural
 On merge: move docs/W-000007-IMPLEMENTATION_PLAN.md and docs/W-000007-progress.txt to docs/archive/.
@@ -25,10 +25,10 @@ On merge: move docs/W-000007-IMPLEMENTATION_PLAN.md and docs/W-000007-progress.t
     [x] 3.2 Run map adapter checks and inspect hybrid map, ink, and solid output
     [x] 3.3 Headless Chromium rendered the normalized hybrid fixture in map, solid, ink, and poster paths; valid temporary PNGs were inspected (1200x657 map/solid/ink, 1654x2339 poster) and removed
 
-[ ] 4.0 Verify and ship PR
+[x] 4.0 Verify and ship PR
     [x] 4.1 Run node test/geography.mjs
     [x] 4.2 Run node test/roadgraph-import.mjs
     [x] 4.3 Run npm test
-    [ ] 4.4 Commit issue-scoped files with Conventional Commits and Closes #42
-    [ ] 4.5 Push branch and open PR in --ship pr mode
-    [ ] 4.6 After merge, move plan/progress to docs/archive/ and remove the worktree
+    [x] 4.4 Commit issue-scoped files with Conventional Commits and Closes #42
+    [x] 4.5 Push branch and open PR in --ship pr mode
+    [x] 4.6 After merge: moved plan/progress to docs/archive/; worktree removed
