@@ -157,6 +157,41 @@ function buildFabric(model, land, rng, config, buildGraph) {
   if (built.importStats) model.stats.import = { ...built.importStats };
   if (built.geography) model.geography = built.geography;
 
+  // Source fabric is accepted before procedural massing. Only geographic land
+  // carries these entries, keeping every procedural graph/BSP path untouched.
+  const claimed = [];
+  if (land.imported) {
+    // Rings rejected at the model boundary are reported alongside the fabric's
+    // own water/reserved rejections; the stats sync below covers both.
+    for (const diagnostic of land.imported.diagnostics) model.geography.diagnostics.push({ ...diagnostic });
+    for (const park of land.imported.parks) {
+      model.parks.push(park);
+      claimed.push(park.polygon);
+    }
+    for (const building of land.imported.buildings) {
+      let code = null, message = null;
+      if (!footprintOnLand(building.footprint)) {
+        code = 'imported-building-water';
+        message = 'imported building footprint is not fully on land';
+      } else if (model.reserved.some(rect => polyIntersectsRect(building.footprint, rect))) {
+        code = 'imported-building-reserved';
+        message = 'imported building footprint intersects reserved infrastructure';
+      }
+      if (code) {
+        model.geography.diagnostics.push({
+          index: building.sourceIndex, sourceId: building.sourceId,
+          sourcePart: building.sourcePart, code, message,
+        });
+        continue;
+      }
+      model.buildings.push(building);
+      claimed.push(building.footprint);
+    }
+    model.geography.stats.diagnostics = model.geography.diagnostics.length;
+    model.stats.import.diagnostics = model.geography.diagnostics.length;
+    model.stats.diagnostics = model.geography.diagnostics.length;
+  }
+
   // ---- roads, bridges, junction caps --------------------------------------
   for (let i = 0; i < g.edges.length; i++) {
     const e = g.edges[i];
@@ -215,7 +250,9 @@ function buildFabric(model, land, rng, config, buildGraph) {
 
   // Landmark: a central, generous, unreserved block.
   {
-    const free = blocksRaw.filter(b => b.buildable && !model.reserved.some(r => buildablePieces(b).some(poly => polyIntersectsRect(poly, r))));
+    const free = blocksRaw.filter(b => b.buildable
+      && !model.reserved.some(r => buildablePieces(b).some(poly => polyIntersectsRect(poly, r)))
+      && !buildablePieces(b).some(overlapsClaimed));
     const dim = b => { const o = obb(b.buildable); return Math.min(o.w, o.d); };
     let cands = free.filter(b => b.pop > .6 && dim(b) > 50);
     if (!cands.length) cands = free.filter(b => b.pop > .35 && dim(b) > 40);
@@ -276,6 +313,7 @@ function buildFabric(model, land, rng, config, buildGraph) {
     const outer = b.buildable;
     if (model.reserved.some(r => polyIntersectsRect(outer, r))) return false;
     if (!footprintOnLand(outer)) return false;
+    if (overlapsClaimed(outer)) return false;
 
     const box = obb(outer), minDim = Math.min(box.w, box.d);
     if (minDim < 24 || area(outer) < 650) return false;
@@ -347,7 +385,10 @@ function buildFabric(model, land, rng, config, buildGraph) {
           continue;
         }
         const bs = massBuilding({ ...rect, zone: b.zone, dist: b.dist }, config, dcfg, rng)
-          .filter(bl => footprintOnLand(orientedRect(bl.cx, bl.cz, bl.w, bl.d, bl.angle || 0)));
+          .filter(bl => {
+            const footprint = orientedRect(bl.cx, bl.cz, bl.w, bl.d, bl.angle || 0);
+            return footprintOnLand(footprint) && !overlapsClaimed(footprint);
+          });
         if (!bs.length) { courtyardFallback(parcel); continue; }
         for (const bl of bs) model.buildings.push(bl);
         parcel.built = true;
@@ -432,9 +473,26 @@ function buildFabric(model, land, rng, config, buildGraph) {
     return false;
   }
 
+  function overlapsClaimed(poly) {
+    return claimed.length > 0 && claimed.some(other => polygonsIntersect(poly, other));
+  }
+
   function buildablePieces(block) {
     return block.buildablePieces || (block.buildable ? [block.buildable] : []);
   }
+}
+
+function polygonsIntersect(a, b) {
+  const aa = bbox(a), bb = bbox(b);
+  if (!(aa.x < bb.x + bb.w && aa.x + aa.w > bb.x && aa.z < bb.z + bb.d && aa.z + aa.d > bb.z)) return false;
+  for (let i = 0; i < a.length; i++) {
+    const p = a[i], q = a[(i + 1) % a.length];
+    for (let j = 0; j < b.length; j++) {
+      const r = b[j], s = b[(j + 1) % b.length];
+      if (segIntersect(p[0], p[1], q[0], q[1], r[0], r[1], s[0], s[1])) return true;
+    }
+  }
+  return pointInPolygon(a[0][0], a[0][1], b) || pointInPolygon(b[0][0], b[0][1], a);
 }
 
 export function scatterTrees(poly, n, rng, model, sRange) {

@@ -19,10 +19,10 @@
 //                footprint?, courtyard? }
 //   landmarks: { x, z, w, d, h, angle }   (x,z = centre)
 
-import { RNG } from './rng.js';
+import { RNG, hashSeed } from './rng.js';
 import { CITY_SIZE, DENSITY, intersects, pickZone, massBuilding } from './common.js';
 import { graphFabric, geographicFabric } from './fabric.js';
-import { rectPoly, bbox, pointInPolygon } from './geom.js';
+import { area, isSimple, rectPoly, bbox, pointInPolygon } from './geom.js';
 import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute, sampleTraffic } from './routing.js';
 
 export { CITY_SIZE } from './common.js';
@@ -39,9 +39,8 @@ export function generateCity(config) {
     rail: null, landmarks: [], water: [], reserved: [],
   };
 
-  // Geographic source: imported line records replace procedural road growth
-  // and imported polygon records are water. Everything downstream of the road
-  // graph is the shared graph fabric.
+  // Geographic source: imported line records replace procedural road growth;
+  // classified polygon records become water or authoritative fabric entries.
   const geographic = config.source === 'geographic';
   if (geographic) model.source = 'geographic';
   const land = geographic ? makeGeographicLand(config, model) : makeLand(config.land, rng, model);
@@ -178,11 +177,9 @@ function makeLand(kind, rng, model) {
   return { kind: 'flat', mask: () => true };
 }
 
-// Geographic land: imported polygon records are water, line records are the
-// road graph (see geographicFabric). Water entries keep the outer ring and
-// every hole so renderers can draw lakes with islands; bbox comes from the
-// outer ring. Draws no RNG so a geographic run never shifts the `:city`
-// stream ahead of rail planning.
+// Geographic polygons are classified at the model boundary. Untagged records
+// remain water for W-000005 compatibility. Draws no RNG so imported fallback
+// heights and a geographic run never shift the shared `:city` stream.
 function makeGeographicLand(config, model) {
   const geography = config.geography;
   if (!geography || typeof geography !== 'object' || !Array.isArray(geography.records)) {
@@ -190,15 +187,114 @@ function makeGeographicLand(config, model) {
   }
   if (config.engine === 'bsp') throw new Error('geographic source requires the graph engine (config.engine = "graph")');
   const records = geography.records.filter(r => r && r.geometry?.type === 'polygon');
+  const waterRecords = [], buildings = [], parks = [], ringDiagnostics = [];
   for (const record of records) {
     if (!Array.isArray(record.geometry.polygons)) throw new TypeError('polygon geometry polygons must be an array');
-    for (const rings of record.geometry.polygons) {
+    const kind = classifyGeographicPolygon(record.properties);
+    if (kind === 'water') waterRecords.push(record);
+    for (let sourcePart = 0; sourcePart < record.geometry.polygons.length; sourcePart++) {
+      const rings = record.geometry.polygons[sourcePart];
       if (!Array.isArray(rings) || !rings.length) throw new TypeError('each polygon must contain at least one ring');
       const [outer, ...holes] = rings.map(openRing);
-      model.water.push({ type: 'imported', polygon: outer, holes, sourceIndex: record.index, sourceId: record.sourceId ?? null, ...bbox(outer) });
+      const provenance = { sourceIndex: record.index, sourceId: record.sourceId ?? null, sourcePart };
+      if (kind === 'water') {
+        model.water.push({ type: 'imported', polygon: outer, holes, ...provenance, ...bbox(outer) });
+      } else if (kind === 'building') {
+        const fault = ringFault(outer);
+        if (fault) {
+          ringDiagnostics.push({ index: record.index, sourceId: record.sourceId ?? null, sourcePart,
+            code: 'imported-building-geometry', message: `imported building outer ring ${fault}` });
+          continue;
+        }
+        const bounds = bbox(outer);
+        buildings.push({
+          ...bounds, cx: bounds.x + bounds.w / 2, cz: bounds.z + bounds.d / 2,
+          h: importedHeight(record, sourcePart), y: 0, angle: 0,
+          zone: 'mixed', style: 'imported', imported: true,
+          footprint: outer, ...(holes[0] ? { courtyard: holes[0] } : {}), ...provenance,
+        });
+      } else {
+        const fault = ringFault(outer);
+        if (fault) {
+          ringDiagnostics.push({ index: record.index, sourceId: record.sourceId ?? null, sourcePart,
+            code: 'imported-park-geometry', message: `imported park outer ring ${fault}` });
+          continue;
+        }
+        const landUse = importedLandUse(record.properties);
+        parks.push({ polygon: outer, imported: true, landUse, ...provenance, ...bbox(outer) });
+      }
     }
   }
-  return { kind: 'imported', records, mask: () => true };
+  return {
+    kind: 'imported', records: waterRecords, mask: () => true,
+    imported: { buildings, parks, diagnostics: ringDiagnostics },
+  };
+}
+
+// A zero-area or self-intersecting outer ring can never become a usable
+// footprint, so the ring is omitted with a stable, deterministic fault label.
+function ringFault(ring) {
+  if (!(area(ring) > 0)) return 'has non-positive area';
+  return isSimple(ring) ? null : 'is not simple';
+}
+
+function classifyGeographicPolygon(properties) {
+  const p = properties && typeof properties === 'object' ? properties : {};
+  if (p.kind === 'building' || truthyTag(p.building)) return 'building';
+  if (p.kind === 'park') return 'park';
+  if (isWaterTagged(p)) return 'water';
+  if (nonEmptyTag(p.landuse) || nonEmptyTag(p.leisure)) return 'park';
+  return 'water';
+}
+
+function nonEmptyTag(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+// False-like tag values disable a tag whether the source used the primitive
+// or the string form; anything else non-empty stays truthy.
+const DISABLED_TAG_VALUES = new Set(['false', '0', 'off', 'no']);
+
+function truthyTag(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) && value !== 0;
+  const tag = String(value).trim().toLowerCase();
+  return tag !== '' && !DISABLED_TAG_VALUES.has(tag);
+}
+
+function isWaterTagged(properties) {
+  if (properties.kind === 'water' || truthyTag(properties.water) || truthyTag(properties.waterway)) return true;
+  const waterValues = new Set(['water', 'reservoir', 'basin', 'pond', 'lake', 'river', 'riverbank', 'canal', 'wetland', 'marsh', 'swimming_pool']);
+  for (const key of ['natural', 'water', 'landuse', 'leisure']) {
+    if (nonEmptyTag(properties[key]) && waterValues.has(String(properties[key]).trim().toLowerCase())) return true;
+  }
+  return false;
+}
+
+function importedLandUse(properties) {
+  const p = properties && typeof properties === 'object' ? properties : {};
+  const value = nonEmptyTag(p.landuse) ? p.landuse : nonEmptyTag(p.leisure) ? p.leisure : 'park';
+  return String(value);
+}
+
+function positiveNumber(value) {
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function importedHeight(record, sourcePart) {
+  const properties = record.properties && typeof record.properties === 'object' ? record.properties : {};
+  const sourceHeight = positiveNumber(properties.height);
+  if (sourceHeight !== null) return sourceHeight;
+  const levels = positiveNumber(properties['building:levels']);
+  const levelsHeight = levels === null ? null : levels * 3;
+  // A huge finite level count can still overflow the product to Infinity;
+  // only a finite derived height is accepted, otherwise the stable fallback.
+  if (levelsHeight !== null && Number.isFinite(levelsHeight)) return levelsHeight;
+  const identity = record.sourceId ?? '';
+  return 12 + hashSeed(`${identity}|${record.index}|${sourcePart}`) % 25;
 }
 
 function openRing(ring) {
