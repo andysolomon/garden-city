@@ -163,6 +163,26 @@ infrastructure, and imported building footprints. Shared map, ink, solid,
 poster, and PNG paths consume the same CityModel with no source-specific
 renderer branch.
 
+### Runtime provider loading
+
+The application `SOURCE` control keeps `PROCEDURAL` as the default. Select
+`HYBRID / REAL DATA` or `GEOGRAPHIC / REAL DATA`, enter a `longitude, latitude`
+pair or a place name, choose a crop radius from 25–450 metres, and press
+`LOAD LOCATION`. Coordinate input can load directly through the compatible OSM
+source; place-name input first uses the Mapbox Geocoding API, so it requires a
+Mapbox public token in the `PROVIDER TOKEN` field. The token is held only in
+memory for the request and is never written to the repository, URL, or local
+storage.
+
+`src/provider.js` owns the asynchronous boundary. It converts Overpass JSON
+(or an already GeoJSON-compatible response) into the normalized records used by
+`generateCity()`, while the model and renderers remain synchronous and
+provider-neutral. Network, missing-token, rate-limit, invalid-response, and
+no-road-data failures are surfaced in the UI without replacing the current
+model. Automated provider tests inject `fetch` and never call a live service.
+The loaded view displays `© OpenStreetMap contributors · Overpass API`, plus
+`© Mapbox` when geocoding was used.
+
 Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 
 ## Files
@@ -173,6 +193,7 @@ Open `contact.html` to eyeball N seeds as top-down thumbnails at once.
 - `src/common.js` — density tables, zoning, massing grammar shared by both engines
 - `src/geography.js` — pure geographic-to-local projection and viewport cropping
 - `src/geojson.js` — pure GeoJSON fixture normalization into local records + diagnostics
+- `src/provider.js` — runtime Mapbox geocoding and Overpass-compatible data adapter
 - `src/geom.js` — geometry kernel: one orientation predicate, quantization, polygon ops
 - `src/fields.js` — water SDF, population, direction and exclusion fields
 - `src/graph.js` — planar road graph: growth loop, local constraints, face extraction

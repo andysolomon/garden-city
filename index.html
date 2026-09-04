@@ -20,6 +20,7 @@
   header .sub{margin-top:4px;color:var(--muted);font-size:10px;letter-spacing:2px}
   #status{position:fixed;right:20px;top:18px;z-index:5;font-size:10px;letter-spacing:2px;color:rgba(20,20,20,.65);background:rgba(245,242,234,.65);backdrop-filter:blur(8px);padding:8px 10px;border:1px solid rgba(0,0,0,.08)}
   #panel{position:fixed;z-index:8;top:72px;left:18px;width:285px;max-height:calc(100vh - 150px);overflow:auto;background:rgba(17,19,23,.94);border:1px solid var(--line);box-shadow:0 14px 50px rgba(0,0,0,.35);backdrop-filter:blur(14px)}
+  #error{position:fixed;right:20px;top:60px;z-index:10;max-width:min(440px,calc(100vw - 40px));font-size:10px;line-height:1.45;letter-spacing:1px;color:#4d1710;background:rgba(255,224,213,.94);border:1px solid #cf674d;padding:10px 12px;box-shadow:0 8px 28px rgba(0,0,0,.2)}
   #panel.hidden{display:none}
   .panel-hd{padding:13px 14px;border-bottom:1px solid var(--line);font-size:10px;letter-spacing:2px;color:#b7bbc3;display:flex;justify-content:space-between}
   .row{display:grid;grid-template-columns:95px 1fr;gap:8px;align-items:center;padding:7px 12px;border-bottom:1px solid rgba(255,255,255,.045)}
@@ -27,6 +28,8 @@
   select,input{width:100%;height:30px;background:#101216;color:#e5e1d7;border:1px solid #343841;padding:0 8px;font:10px "Courier New",monospace;outline:none}
   select:focus,input:focus{border-color:#666d79}
   .panel-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;padding:10px}
+  .provider-actions{padding:10px;border-bottom:1px solid rgba(255,255,255,.045)}
+  .provider-actions button{width:100%}
   button{height:34px;background:#20242a;color:#d9d6cd;border:1px solid #3a3f48;font:9px "Courier New",monospace;letter-spacing:1.2px;cursor:pointer}
   button:hover{background:#2a2f37}
   button.primary{background:var(--accent);border-color:var(--accent);color:#161616;font-weight:700}
@@ -56,6 +59,8 @@
   body.ink #bottom{bottom:58px}
   body.ink #help{bottom:112px}
   body.ink #stats{bottom:58px}
+  body.ink #attribution{bottom:58px}
+  #attribution{position:fixed;left:18px;bottom:18px;z-index:7;max-width:calc(100vw - 36px);font-size:9px;letter-spacing:.5px;color:rgba(30,30,30,.68);background:rgba(245,242,234,.72);border:1px solid rgba(0,0,0,.08);padding:6px 8px;backdrop-filter:blur(8px);pointer-events:none}
 
   @media(max-width:720px){
     #panel{left:10px;right:10px;width:auto;top:58px;max-height:62vh}
@@ -80,7 +85,8 @@
 <div id="app">
   <div id="viewport"></div>
   <header><div class="title">GENERATIVE ANTITECTURE</div><div class="sub">CITY ENGINE · MODEL → GEOMETRY → RENDER</div></header>
-  <div id="status">READY</div>
+  <div id="status" role="status" aria-live="polite">READY</div>
+  <div id="error" role="alert" aria-live="assertive" hidden></div>
 
   <div id="poster-overlay">
     <div class="po-top"><span id="po-spec">SPECIMEN 0000 : QUARTER</span><span>&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;</span><span class="po-orange" id="po-sector">MIXED SECTOR / DAYLIGHT</span></div>
@@ -92,6 +98,11 @@
   <aside id="panel">
     <div class="panel-hd"><span>CITY PARAMETERS</span><span>v2.1</span></div>
     <div class="row"><label>MODE</label><select id="mode"><option value="ink" selected>INK / POSTER</option><option value="solid">SOLID</option><option value="map">MAP / DEBUG</option></select></div>
+    <div class="row"><label>SOURCE</label><select id="source"><option value="procedural" selected>PROCEDURAL</option><option value="hybrid">HYBRID / REAL DATA</option><option value="geographic">GEOGRAPHIC / REAL DATA</option></select></div>
+    <div class="row provider-only" hidden><label>LOCATION</label><input id="location" value="-73.9857,40.7484" placeholder="longitude, latitude or place" spellcheck="false" autocomplete="off" /></div>
+    <div class="row provider-only" hidden><label>CROP RADIUS (M)</label><input id="cropRadius" type="number" min="25" max="450" step="25" value="100" /></div>
+    <div class="row provider-only" hidden><label>PROVIDER TOKEN</label><input id="providerToken" type="password" placeholder="runtime only" autocomplete="off" spellcheck="false" /></div>
+    <div class="provider-actions provider-only" hidden><button id="loadLocation" class="primary">LOAD LOCATION</button></div>
     <div class="row"><label>ENGINE</label><select id="engine"><option value="graph" selected>ROAD GRAPH</option><option value="bsp">SUBDIVISION (V1)</option></select></div>
     <div class="row"><label>PATTERN</label><select id="pattern"><option value="manhattan" selected>MANHATTAN</option><option value="paris">PARIS</option><option value="tokyo">TOKYO</option><option value="medieval">MEDIEVAL</option><option value="atlanta">ATLANTA</option></select></div>
     <div class="row"><label>PALETTE</label><select id="palette"><option value="concrete">CONCRETE</option><option value="warm">WARM URBAN</option><option value="cool">COOL METRO</option><option value="nocturne">NOCTURNE</option></select></div>
@@ -113,6 +124,7 @@
   <div id="help">DRAG TO ORBIT · WHEEL/PINCH TO ZOOM · RIGHT-DRAG TO PAN · <a href="contact.html" style="color:inherit;pointer-events:auto">CONTACT SHEET</a></div>
   <div id="bottom"><button id="options">OPTIONS</button><button id="generate" class="primary">GENERATE</button><button id="fit">FIT</button><button id="save">SAVE PNG</button></div>
   <div id="stats"></div>
+  <div id="attribution" hidden aria-live="polite"></div>
 </div>
 
 <script type="module" src="./src/main.js"></script>
