@@ -1,0 +1,31 @@
+W-000008 progress
+
+2026-09-04  Resolve issue #43, draft contract, and create isolated worktree.
+2026-09-04  Implement src/provider.js with coordinate parsing, Overpass
+            query builder, Overpass -> GeoJSON conversion, JSON fetch seam,
+            and ProviderError codes (missing-token, rate-limit, network,
+            invalid-response, no-road-data, location-not-found,
+            invalid-radius, invalid-location).
+2026-09-04  Wire main.js: SOURCE / LOCATION / CROP RADIUS / PROVIDER TOKEN
+            controls, LOAD LOCATION button, status / error / attribution
+            banners, AbortController cancellation, requestKey guard.
+2026-09-04  Add mocked provider test suite (test/provider.mjs) and wire
+            it into npm test. Run full test suite (invariants, grade,
+            geography, provider) - all green.
+2026-09-04  Headless Chromium smoke confirms the procedural default still
+            boots and src/provider.js is fetched.
+2026-09-04  Live coordinate round-trip verified for -73.9857, 40.7484 at
+            radius 100 in both geographic and hybrid modes.
+2026-09-04  Adjust Overpass POST headers: drop ;charset=UTF-8, add a
+            conditional non-browser User-Agent so Node fetch is not
+            rejected with HTTP 406.
+2026-09-04  Lower default crop radius from 450 to 100; the upstream
+            Overpass mirror timeouts at larger radii for the tested
+            locations, while the 25-450 input range still allows
+            operator overrides.
+2026-09-04  Force-push commit f36bdfb and open PR #53.
+2026-09-06  Squash-merge PR #53 as 07166a9. Worktree cleanup blocked by
+            git because the W-000008 worktree is still attached; remove
+            it manually when review iterations are finished.
+2026-09-06  Archive docs/W-000008-IMPLEMENTATION_PLAN.md and
+            docs/W-000008-progress.txt; remove the W-000008 worktree.
