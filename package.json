@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node test/invariants.mjs && node test/grade.mjs && node test/geography.mjs",
+    "test": "node test/invariants.mjs && node test/grade.mjs && node test/geography.mjs && node test/provider.mjs",
     "serve": "./serve.sh"
   }
 }
