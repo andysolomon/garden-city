@@ -23,7 +23,7 @@ import { RNG, hashSeed } from './rng.js';
 import { CITY_SIZE, DENSITY, intersects, pickZone, massBuilding } from './common.js';
 import { graphFabric, geographicFabric } from './fabric.js';
 import { area, isSimple, rectPoly, bbox, pointInPolygon } from './geom.js';
-import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute, sampleTraffic } from './routing.js';
+import { buildDrivableAdjacency, lengthBudgetDijkstra, shortestPath, positionOnRoute, rightLaneOffset, sampleTraffic } from './routing.js';
 
 export { CITY_SIZE } from './common.js';
 export { TRAFFIC_SAMPLE_COUNT } from './routing.js';
@@ -594,12 +594,16 @@ function addStaticCars(level, model, rng) {
     const r = rng.pick(pool);
     if (r.len < 14) continue;
     const t = rng.float(6 / r.len, 1 - 6 / r.len);
-    const lateral = rng.float(-r.width * .25, r.width * .25);
+    // Keep the legacy draw sequence, but place cars in the right-hand lane
+    // relative to the road's a -> b heading (the rendered car orientation).
+    rng.float(-r.width * .25, r.width * .25);
+    const bridge = model.bridges.includes(r);
+    const lateral = -rightLaneOffset(r.width, bridge);
     const dx = r.b[0] - r.a[0], dz = r.b[1] - r.a[1];
     const nx = -dz / r.len, nz = dx / r.len;
     model.cars.push({
       x: r.a[0] + dx * t + nx * lateral, z: r.a[1] + dz * t + nz * lateral,
-      rot: -r.angle, s: rng.float(.85, 1.15), bridge: model.bridges.includes(r),
+      rot: -r.angle, s: rng.float(.85, 1.15), bridge,
     });
   }
 }

@@ -9,7 +9,7 @@ import { generateCity, WALKSHED_BUDGET } from '../src/model.js';
 import { resolvePreset } from '../src/presets.js';
 import { hashSeed } from '../src/rng.js';
 import { VIRTUAL } from '../src/graph.js';
-import { TRAFFIC_SAMPLE_COUNT, buildDrivableAdjacency, lengthBudgetDijkstra, sampleTraffic, shortestPath, positionOnRoute } from '../src/routing.js';
+import { TRAFFIC_SAMPLE_COUNT, buildDrivableAdjacency, lengthBudgetDijkstra, sampleTraffic, shortestPath, positionOnRoute, rightLaneOffset } from '../src/routing.js';
 import { makeDirection, makeNoise, makeWater } from '../src/fields.js';
 import { fitRect, mergeLandlockedParcels } from '../src/blocks.js';
 import {
@@ -480,6 +480,13 @@ function checkTraffic(seed, m) {
       const a = g.nodes[edge.a], b = g.nodes[edge.b];
       const clearance = pointSegDist(p.x, p.z, a.x, a.z, b.x, b.z).d;
       check(seed, !edge.removed && !VIRTUAL.has(edge.cls) && clearance <= edge.width / 2 + 1e-7, `car ${ci} leaves road clearance at t=${elapsed}`);
+      check(seed, clearance + 1.9 <= edge.width / 2 + 1e-7 || rightLaneOffset(edge.width, edge.bridge) === 0,
+        `car ${ci} body leaves the road at t=${elapsed}`);
+      // On legacy width-5 bridges even a centered car cannot fit between
+      // parapets; assert body clearance only where the geometry permits it.
+      if (edge.bridge && edge.width / 2 - 1.5 >= 1.9) check(seed,
+        clearance + 1.9 <= edge.width / 2 - 1.5 + 1e-7,
+        `car ${ci} overlaps a bridge parapet at t=${elapsed}`);
     }
     if (routeHasTurn(g, car)) turns++;
   }
@@ -606,16 +613,46 @@ function checkRouteMotion() {
   const p0 = positionOnRoute(graph, car, 0), p1 = positionOnRoute(graph, car, .5);
   check('focused/route-motion', p1.x > p0.x, 'elapsed progress did not move the car');
 
+  const forwardLane = positionOnRoute(graph, car, 1); // midway along the first edge
+  const reverseLane = positionOnRoute(graph, car, 7); // same location, returning
+  check('focused/route-motion', Math.abs(forwardLane.x - reverseLane.x) < 1e-7
+    && forwardLane.z < -1.9 && reverseLane.z > 1.9, 'opposing cars did not use opposite right-hand lanes');
+  check('focused/route-motion', Math.abs(forwardLane.z) + 1.9 <= 8 / 2 + 1e-7,
+    'normal-road lane leaves the car body off the road');
+
   const turnBefore = positionOnRoute(graph, car, 9.9 / car.speed);
   const turnAfter = positionOnRoute(graph, car, 10.1 / car.speed);
   check('focused/route-motion', Math.abs(turnBefore.rot - turnAfter.rot) > .5, 'turn heading did not change');
+  check('focused/route-motion', Math.hypot(turnBefore.x - turnAfter.x, turnBefore.z - turnAfter.z) < .3,
+    'car jumped between lanes at the intersection');
 
   const end = positionOnRoute(graph, car, car.routeLength / car.speed);
   const afterEnd = positionOnRoute(graph, car, car.routeLength / car.speed + .01);
   check('focused/route-motion', Math.hypot(end.x - afterEnd.x, end.z - afterEnd.z) < .1, 'route-end reversal teleported');
+  const beforeEnd = positionOnRoute(graph, car, car.routeLength / car.speed - .01);
+  check('focused/route-motion', Math.hypot(beforeEnd.x - afterEnd.x, beforeEnd.z - afterEnd.z) < .2,
+    'car jumped across the road on reversal');
   const cycle = positionOnRoute(graph, car, car.routeLength * 2 / car.speed);
   check('focused/route-motion', Math.hypot(cycle.x - p0.x, cycle.z - p0.z) < 1e-7 && Math.abs(cycle.rot - p0.rot) < 1e-7, 'route cycle did not loop');
   check('focused/route-motion', JSON.stringify(car) === before, 'route sampling mutated the car');
+
+  // Where the deck allows, opposing bridge lanes fit between the parapets.
+  graph.edges[1].bridge = true;
+  graph.edges[1].width = 9;
+  const bridgeForward = positionOnRoute(graph, car, 3);
+  const bridgeReverse = positionOnRoute(graph, car, 5);
+  check('focused/route-motion', bridgeForward.edge === 1 && bridgeReverse.edge === 1
+    && Math.abs(bridgeForward.z - bridgeReverse.z) < 1e-7
+    && Math.abs(bridgeForward.x - 10 - rightLaneOffset(9, true)) < 1e-7
+    && Math.abs(bridgeReverse.x - 10 + rightLaneOffset(9, true)) < 1e-7
+    && rightLaneOffset(9, true) > 0 && rightLaneOffset(9, true) + 1.9 <= 9 / 2 - 1.5,
+  'opposing bridge cars did not clear parapets in their right-hand lanes');
+  // Width-5 bridges are narrower than one car between parapets, so there is
+  // no lane to offset into: cars stay centered rather than clip a parapet.
+  graph.edges[1].width = 5;
+  const narrow = positionOnRoute(graph, car, 3);
+  check('focused/route-motion', rightLaneOffset(5, true) === 0 && Math.abs(narrow.x - 10) < 1e-7
+    && 5 / 2 - 1.5 < 1.9, 'width-5 bridge cars did not stay centered');
 }
 
 checkRouteMotion();
@@ -914,7 +951,21 @@ for (const life of ['low', 'high']) {
   check(seed, m.cars.length > 0, `BSP life=${life} generated no legacy cars`);
   for (const [ci, car] of m.cars.entries()) {
     check(seed, !car.path && [car.x, car.z, car.rot].every(Number.isFinite), `BSP car ${ci} lost static placement contract`);
+    const onRight = m.roads.concat(m.bridges).some(r => {
+      const bridge = m.bridges.includes(r);
+      if (Math.abs(car.rot + r.angle) > 1e-7 || car.bridge !== bridge) return false;
+      const dx = r.b[0] - r.a[0], dz = r.b[1] - r.a[1], len = Math.hypot(dx, dz);
+      const along = ((car.x - r.a[0]) * dx + (car.z - r.a[1]) * dz) / len;
+      const lateral = (-(car.x - r.a[0]) * dz + (car.z - r.a[1]) * dx) / len;
+      const lane = rightLaneOffset(r.width, bridge);
+      return along >= 6 - 1e-7 && along <= len - 6 + 1e-7
+        && (lane === 0 ? Math.abs(lateral) < 1e-7 : lateral < -1e-7 && -lateral <= lane + 1e-7)
+        && (!bridge || r.width / 2 - 1.5 < 1.9 || -lateral + 1.9 <= r.width / 2 - 1.5 + 1e-7);
+    });
+    check(seed, onRight, `BSP car ${ci} is not in the right-hand lane of a road`);
   }
+  const replay = generateCity(config);
+  check(seed, JSON.stringify(m.cars) === JSON.stringify(replay.cars), 'BSP lane placement is not deterministic');
 }
 
 {
