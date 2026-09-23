@@ -8,6 +8,13 @@ import { VIRTUAL } from './graph.js';
 export const ROUTE_SPEED = Object.freeze({ arterial: 1.45, collector: 1.12, local: .86 });
 export const TRAFFIC_SAMPLE_COUNT = 128;
 
+// Cars are at most 3.2 * 1.15 wide. Solid bridge parapets begin 1.5 units
+// inside the deck edge (.95 inset for their center, plus .55 half-width).
+export function rightLaneOffset(width, bridge = false) {
+  const clearance = bridge ? 3.4 : 1.9; // half car width + parapet inset (if any)
+  return Math.max(0, Math.min(width / 4, width / 2 - clearance));
+}
+
 const TRAFFIC_ROUTE_ATTEMPTS = 12;
 const TRAFFIC_FALLBACK_ATTEMPTS = 256;
 
@@ -279,10 +286,20 @@ export function positionOnRoute(graph, car, elapsed = 0) {
   const edge = path[index], length = graph.edgeLength(edge) || 1;
   const from = graph.nodes[nodes[index]], to = graph.nodes[nodes[index + 1]];
   const u = Math.max(0, Math.min(1, (travel - offset) / length));
-  const x = from.x + (to.x - from.x) * u, z = from.z + (to.z - from.z) * u;
-  const angle = Math.atan2(to.z - from.z, to.x - from.x) + (forward ? 0 : Math.PI);
+  const dx = to.x - from.x, dz = to.z - from.z;
   const metadata = graph.edges[edge];
   const bridge = !!metadata.bridge, tunnel = !!metadata.tunnel;
+  // Right-hand traffic: the right normal reverses when the car heads back.
+  // Ease into the junction center at each endpoint so adjacent edges (and
+  // the turnaround at either end of the route) meet without a position jump.
+  // Bridge lanes also leave room between the car body and the parapets.
+  const lane = rightLaneOffset(metadata.width, bridge);
+  const approach = Math.min(4, length / 2);
+  const inset = approach ? lane * Math.min(1, u * length / approach, (1 - u) * length / approach) : 0;
+  const side = forward ? 1 : -1;
+  const x = from.x + dx * u + dz / length * inset * side;
+  const z = from.z + dz * u - dx / length * inset * side;
+  const angle = Math.atan2(dz, dx) + (forward ? 0 : Math.PI);
   return {
     x, z, rot: -angle, bridge,
     elevated: bridge || (metadata.level ?? 0) > 0,
