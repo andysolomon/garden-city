@@ -176,6 +176,10 @@ export const ANCHOR_FINE_STEP = 2;
 // covering the residual between fine samples and the continuous surface.
 export const CLEARANCE_SAMPLE_STEP = 2;
 export const CLEARANCE_MARGIN = .25;
+// Spacing of the interior bridge stations that climb to nearby banks, so a
+// bank beside the middle of a long span is cleared as well as those at its
+// landings.
+export const BRIDGE_BANK_STATION_STEP = SHORE_BLEND / 4;
 // Half of the width an elevated line occupies around its axis (rails at ±6,
 // sleepers/cross ties at ±8, supports at ±4).
 export const RAIL_HALF_WIDTH = 9;
@@ -308,9 +312,14 @@ export function pillar(sample, spec, top, minH = 1.5) {
 
 // Bridge deck datum: at least the flat datum, and at least the highest sampled
 // surface under the complete span plus BRIDGE_CLEARANCE (+ CLEARANCE_MARGIN).
-// A fine grid over both the axis and the deck width catches interior ridges
-// and shoreline ramps as well as high banks. Legacy {x, z, w, d} bridges are
-// treated as axis-aligned spans along their longer side.
+// On water-masked terrain, also sample inland from each landing: the shoreline
+// itself is at water height, not bank height. The inland reach follows the
+// shoreline normal out to full blend, not the span axis — on oblique or grazing
+// crossings an axial reach barely gains shoreline distance and never climbs
+// the whole bank. Bounded stations along the span climb the same way, so banks
+// beside the middle of a long span count too.
+// A fine grid across the deck width catches interior ridges and ramps. Legacy
+// {x, z, w, d} bridges are treated as axis-aligned spans along their longer side.
 // A bridge with an explicit axis: {a, b, cx, cz, len, width, angle}. Legacy
 // {x, z, w, d} bridges become axis-aligned spans along their longer side, so
 // deck height and deck lookup agree on the same geometry.
@@ -339,19 +348,94 @@ export function bridgeDeckY(sample, b, flatY = BRIDGE_FLAT_Y, clearance = BRIDGE
   const along = Math.max(1, Math.ceil(len / spacing));
   const across = Math.max(1, Math.ceil(width / spacing));
   let hi = -Infinity;
+  const edge = (cx, cz, j) => {
+    const offset = width * (j / across - .5);
+    return [cx + nx * offset, cz + nz * offset];
+  };
   for (let i = 0; i <= along; i++) {
-    const t = i / along, cx = a[0] + dx * t, cz = a[1] + dz * t;
+    const t = i / along;
     for (let j = 0; j <= across; j++) {
-      const offset = width * (j / across - .5);
-      hi = Math.max(hi, sample(cx + nx * offset, cz + nz * offset));
+      const [x, z] = edge(a[0] + dx * t, a[1] + dz * t, j);
+      hi = Math.max(hi, sample(x, z));
+    }
+  }
+  const sdf = sample.sdf;
+  if (sdf && sample.isLand) {
+    // Climb the bank from each landing point along the shoreline normal (the
+    // signed-distance gradient) until the full blend is reached — beyond it no
+    // further shoreline lift exists. Following the normal rather than the span
+    // axis reaches the bank in SHORE_BLEND of travel however shallow the
+    // crossing, so the climb has a fixed step budget per landing point.
+    const h = spacing / 2;
+    const climb = (x, z) => {
+      let s = sdf(x, z);
+      if (!Number.isFinite(s) || s >= SHORE_BLEND || s < -SHORE_BLEND) return;
+      const steps = Math.ceil((SHORE_BLEND - s) / spacing) + 2;
+      for (let k = 0; k < steps; k++) {
+        const gx = sdf(x + h, z) - sdf(x - h, z), gz = sdf(x, z + h) - sdf(x, z - h);
+        const g = Math.hypot(gx, gz);
+        if (!(g > 1e-9)) return;
+        x += gx / g * spacing; z += gz / g * spacing;
+        const next = sdf(x, z);
+        if (!Number.isFinite(next) || next <= s) return;
+        s = next;
+        if (sample.isLand(x, z)) hi = Math.max(hi, sample(x, z));
+        if (s >= SHORE_BLEND) return;
+      }
+    };
+    for (const [px, pz] of [a, end]) {
+      for (let j = 0; j <= across; j++) climb(...edge(px, pz, j));
+    }
+    // A long shallow crossing can pass within the blend of a high bank far
+    // from either landing. Interior stations every BRIDGE_BANK_STATION_STEP
+    // climb from both deck edges (off the channel's medial axis, where the
+    // shoreline gradient vanishes), so the work grows with span length like
+    // the deck grid, at the same fixed budget per climb.
+    const stations = Math.max(1, Math.ceil(len / BRIDGE_BANK_STATION_STEP));
+    for (let i = 1; i < stations; i++) {
+      const t = i / stations, cx = a[0] + dx * t, cz = a[1] + dz * t;
+      climb(...edge(cx, cz, 0));
+      if (width > 0) climb(...edge(cx, cz, across));
     }
   }
   return Math.max(flatY, hi + clearance + Math.max(0, margin || 0));
 }
 
+// Endpoints this close are the same junction when chaining bridge spans into
+// one continuous run.
+export const BRIDGE_JOIN_TOLERANCE = .5;
+
+// One deck datum per connected bridge run: spans whose endpoints touch (within
+// BRIDGE_JOIN_TOLERANCE) chain into a run, and every span of the run takes the
+// highest deck the run needs — so adjacent segments cannot show a visible
+// height step while every span still clears its own terrain. Disconnected
+// spans stay independently elevated. Returns an array aligned with
+// model.bridges.
+export function bridgeRunDecks(model, sample, flatY = BRIDGE_FLAT_Y, clearance = BRIDGE_CLEARANCE, step = CLEARANCE_SAMPLE_STEP, margin = CLEARANCE_MARGIN, tol = BRIDGE_JOIN_TOLERANCE) {
+  const bridges = model?.bridges || [];
+  const decks = bridges.map(b => bridgeDeckY(sample, b, flatY, clearance, step, margin));
+  const norm = bridges.map(b => normalizeBridge(b));
+  const parent = decks.map((_, i) => i);
+  const find = i => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const join = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= tol;
+  for (let i = 0; i < norm.length; i++) for (let j = i + 1; j < norm.length; j++) {
+    if (join(norm[i].a, norm[j].a) || join(norm[i].a, norm[j].b)
+      || join(norm[i].b, norm[j].a) || join(norm[i].b, norm[j].b)) parent[find(j)] = find(i);
+  }
+  const run = new Map();
+  for (let i = 0; i < decks.length; i++) {
+    const r = find(i);
+    run.set(r, Math.max(run.get(r) ?? -Infinity, decks[i]));
+  }
+  return decks.map((_, i) => run.get(find(i)));
+}
+
 // (x, z) → deck datum of the nearest bridge axis, for cars flagged `bridge`.
+// Runs of connected spans share their elevation, so cars stay level with the
+// deck they ride.
 export function bridgeDeckLookup(model, sample, flatY = BRIDGE_FLAT_Y, clearance = BRIDGE_CLEARANCE) {
-  const decks = (model.bridges || []).map(b => ({ b: normalizeBridge(b), y: bridgeDeckY(sample, b, flatY, clearance) }));
+  const ys = bridgeRunDecks(model, sample, flatY, clearance);
+  const decks = (model?.bridges || []).map((b, i) => ({ b: normalizeBridge(b), y: ys[i] }));
   if (!decks.length || !sample) return () => flatY;
   return (x, z) => {
     let best = null, bd = Infinity;

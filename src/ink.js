@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import { RNG } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
-import { flatPolygonsGeometry, polygonPrismGeometry, polygonPrismsGeometry, groundY, terrainFrame, drapeSegmentsForSpan, anchorFootprint, pillar, bridgeDeckY, bridgeDeckLookup, elevatedRailY, terrainCells, terrainSkirtGeometry, BRIDGE_FLAT_Y, DRAPE_EDGE_SEGMENTS, RAIL_FLAT_Y } from './render.js';
+import { flatPolygonsGeometry, polygonPrismGeometry, polygonPrismsGeometry, groundY, terrainFrame, drapeSegmentsForSpan, anchorFootprint, pillar, bridgeRunDecks, bridgeDeckLookup, elevatedRailY, terrainCells, terrainSkirtGeometry, BRIDGE_FLAT_Y, DRAPE_EDGE_SEGMENTS, RAIL_FLAT_Y } from './render.js';
 import { orientedRect } from './geom.js';
 import { positionOnRoute, routeCarPlacement } from './routing.js';
 
@@ -225,8 +225,9 @@ export function renderInk(viewer, model) {
   const { gy, lift: sample, surface, datum, waterTop } = inkSurface(model);
   const at = (x, z, y = 0) => y + (surface ? surface(x, z) : 0);
   world.userData.terrain = { mode: 'ink', datum, elevated: !!surface, waterTop: surface ? waterTop : null };
+  const runDecks = bridgeRunDecks(model, surface);
   world.userData.infrastructure = {
-    bridgeDecks: model.bridges.map(b => bridgeDeckY(surface, b)),
+    bridgeDecks: runDecks,
     railY: model.rail?.elevated ? elevatedRailY(surface, model.rail, RAIL_FLAT_Y) : null,
   };
   const main = new InkLines(rng, .55, sample);
@@ -301,8 +302,8 @@ export function renderInk(viewer, model) {
   // Bridges: paper deck + drawn structure, oriented along the span. The deck
   // sits at least BRIDGE_CLEARANCE above the higher bank surface (3.4 when
   // flat); on terrain the bank ends get drawn piers down to the ground.
-  for (const b of model.bridges) {
-    const deck = bridgeDeckY(surface, b), top = deck + 2.2, rail = top + 3;
+  for (const [bi, b] of model.bridges.entries()) {
+    const deck = runDecks[bi], top = deck + 2.2, rail = top + 3;
     world.add(instancedBoxes([{ cx: b.cx, cz: b.cz, w: b.len, d: b.width, h: 2.2, y: deck, angle: b.angle }], fillMat(T.paper)));
     main.obox(b.cx, deck, b.cz, b.len, 2.2, b.width, b.angle);
     const [ka, kb] = kerbs(b, .6);
