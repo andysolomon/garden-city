@@ -4,7 +4,7 @@
 // junction caps, and buildings/landmarks are yawed by their `angle`.
 
 import * as THREE from 'three';
-import { mat, addBox, addBoxes, flatPolygonsGeometry, polygonPrismGeometry, terrainFrame, anchorFootprint, pillar, bridgeDeckY, bridgeDeckLookup, elevatedRailY, terrainCells, terrainSkirtGeometry, BRIDGE_FLAT_Y, RAIL_FLAT_Y } from './render.js';
+import { mat, addBox, addBoxes, flatPolygonsGeometry, polygonPrismGeometry, terrainFrame, anchorFootprint, pillar, bridgeRunDecks, bridgeDeckLookup, elevatedRailY, terrainCells, terrainSkirtGeometry, BRIDGE_FLAT_Y, RAIL_FLAT_Y } from './render.js';
 import { hashSeed } from './rng.js';
 import { CITY_SIZE, railRuns } from './model.js';
 import { orientedRect } from './geom.js';
@@ -62,8 +62,9 @@ export function renderSolid(viewer, model) {
   const { lift: sample, surface, datum, waterTop } = terrainFrame(model);
   const at = (x, z, y = 0) => y + (surface ? surface(x, z) : 0);
   world.userData.terrain = { mode: 'solid', datum, elevated: !!surface, waterTop: surface ? waterTop : null };
+  const runDecks = bridgeRunDecks(model, surface);
   world.userData.infrastructure = {
-    bridgeDecks: model.bridges.map(b => bridgeDeckY(surface, b)),
+    bridgeDecks: runDecks,
     railY: model.rail?.elevated ? elevatedRailY(surface, model.rail, RAIL_FLAT_Y) : null,
   };
   if (surface) {
@@ -108,10 +109,10 @@ export function renderSolid(viewer, model) {
   // flat) and the piers reach from that deck down to the ground under them.
   const deckMat = mat(new THREE.Color(pal.road).multiplyScalar(1.08), .7);
   const pierMat = mat(0x8e8a83);
-  for (const b of model.bridges) {
+  for (const [bi, b] of model.bridges.entries()) {
     const c = Math.cos(b.angle), s = Math.sin(b.angle);
     const off = (u, v) => ({ cx: b.cx + u * c - v * s, cz: b.cz + u * s + v * c });
-    const deck = bridgeDeckY(surface, b);
+    const deck = runDecks[bi];
     addOBox(world, { ...off(0, 0), w: b.len, d: b.width, h: 2.4, angle: b.angle }, deckMat, deck);
     addOBox(world, { ...off(0, b.width / 2 - .95), w: b.len, d: 1.1, h: 2.2, angle: b.angle }, deckMat, deck + 2.4);
     addOBox(world, { ...off(0, -b.width / 2 + .95), w: b.len, d: 1.1, h: 2.2, angle: b.angle }, deckMat, deck + 2.4);
