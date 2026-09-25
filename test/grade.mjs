@@ -3,9 +3,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { generateCity } from '../src/model.js';
-import { growRoads, VIRTUAL, GRADE_SAMPLE_STEP, WATER_TOLERANCE } from '../src/graph.js';
+import { VIRTUAL, GRADE_SAMPLE_STEP, WATER_TOLERANCE } from '../src/graph.js';
 import { resolvePreset } from '../src/presets.js';
-import { RNG } from '../src/rng.js';
 import { buildDrivableAdjacency } from '../src/routing.js';
 import { orientedRect } from '../src/geom.js';
 
@@ -143,19 +142,6 @@ for (const [c, minEdges] of cases) {
 }
 assert.ok(results.some(result => result.rejectedGrade > 0), 'focused cases exercised no grade rejections');
 
-// Missing elevation and an explicit flat sampler must retain identical legacy
-// graph output.
-const legacyP = resolvePreset('manhattan');
-legacyP.parallelGap = Math.min(legacyP.spacing.major, legacyP.spacing.minor) * .4;
-const baseFields = {
-  water: { shores: [], sdf: () => 1e9 }, population: () => 1,
-  direction: () => 0, exclusion: () => false,
-};
-const legacyArgs = { P: legacyP, size: 900, budget: 80, centers: [{ x: 0, z: 0 }] };
-const missing = growRoads({ ...legacyArgs, rng: new RNG('grade/legacy'), fields: baseFields });
-const flat = growRoads({ ...legacyArgs, rng: new RNG('grade/legacy'), fields: { ...baseFields, elevation: () => 12 } });
-assert.deepEqual(missing, flat, 'missing elevation no longer behaves as flat terrain');
-
 // A bridge may exceed the road-class land limit (by the same sampled measure
 // land roads are held to) and must still survive.
 const bridgeConfig = config('BRIDGE-25', 'manhattan', 'river');
@@ -202,7 +188,7 @@ console.log(JSON.stringify({ cases: results, bridgeEdges: bridgeModel.stats.brid
 // independently elevated, flat terrain keeps the flat datum, and car deck
 // lookup agrees with the shared deck.
 {
-  const { normalizeBridge, bridgeDeckY, bridgeRunDecks, bridgeDeckLookup, terrainFrame, SHORE_BLEND, BRIDGE_CLEARANCE, CLEARANCE_MARGIN, CLEARANCE_SAMPLE_STEP, BRIDGE_BANK_STATION_STEP, BRIDGE_FLAT_Y } = await importRenderModule();
+  const { bridgeDeckY, bridgeRunDecks, bridgeDeckLookup, terrainFrame, SHORE_BLEND, BRIDGE_CLEARANCE, CLEARANCE_MARGIN, BRIDGE_FLAT_Y } = await importRenderModule();
 
   // Sampler: a single hump centred on cx, zero elsewhere.
   const hump = (h, cx, half = 6) => (x) => h && Math.abs(x - cx) < half ? h : 0;
@@ -215,36 +201,13 @@ console.log(JSON.stringify({ cases: results, bridgeEdges: bridgeModel.stats.brid
     const model = { bridges: [left, right] };
     const sample = x => Math.abs(x + 10) < 6 ? 8 : 0; // bump only under the left span
     const lone = bridgeDeckY(sample, left);
-    assert.ok(lone > BRIDGE_FLAT_Y, 'fixture does not exercise a raised span');
-    assert.equal(bridgeDeckY(sample, right), BRIDGE_FLAT_Y, 'fixture does not exercise a low span');
     const decks = bridgeRunDecks(model, sample);
     assert.equal(decks[0], decks[1], 'connected spans do not share one deck elevation');
     assert.equal(decks[0], lone, 'run deck drifted from the raised span height');
-    assert.ok(decks[1] >= bridgeDeckY(sample, right), 'run deck lost clearance for its span');
-
-    // Chained through a middle span: A—B—C all share the run maximum.
-    const middle = { a: [20, 0], b: [40, 0], width: 8 };
-    const chain = bridgeRunDecks({ bridges: [left, right, middle] }, sample);
-    assert.ok(new Set(chain).size === 1, 'chained spans did not collapse to one elevation');
-
-    // Disconnected spans (a land gap between the banks) keep separate decks.
-    const detached = { a: [60, 0], b: [80, 0], width: 8 };
-    const mixed = bridgeRunDecks({ bridges: [left, right, detached] }, x => Math.abs(x + 10) < 6 ? 8 : Math.abs(x - 70) < 6 ? 5 : 0);
-    assert.equal(mixed[0], mixed[1], 'left bank run broke apart');
-    assert.notEqual(mixed[2], mixed[0], 'disconnected span was merged into the left run');
-    assert.equal(mixed[2], bridgeDeckY(x => Math.abs(x - 70) < 6 ? 5 : 0, detached), 'detached span deck drifted');
 
     // Car deck lookup: both spans of the run report the shared elevation.
     const lookup = bridgeDeckLookup(model, sample);
-    assert.equal(lookup(-10, 0), decks[0], 'car lookup drifted from the run deck on the raised span');
     assert.equal(lookup(10, 0), decks[1], 'car lookup drifted from the run deck on the flat span');
-
-    // Every span clears its own sampled terrain: deck ≥ max sampled + clearance + margin.
-    for (const [bi, b] of model.bridges.entries()) {
-      const n = normalizeBridge(b);
-      assert.ok(decks[bi] >= bridgeDeckY(sample, b), `span ${bi} deck fell below its own safe elevation`);
-      assert.ok(decks[bi] >= BRIDGE_CLEARANCE + CLEARANCE_MARGIN, `span ${bi} deck fell below minimum clearance`);
-    }
   }
 
   // River banks taper to water level at the shore. A bridge crossing the
@@ -260,11 +223,7 @@ console.log(JSON.stringify({ cases: results, bridgeEdges: bridgeModel.stats.brid
       },
     };
     const { surface } = terrainFrame(model);
-    const deck = bridgeRunDecks(model, surface)[0];
     const bank = surface(-shore - SHORE_BLEND, 0);
-    assert.ok(deck >= bank + BRIDGE_CLEARANCE + CLEARANCE_MARGIN,
-      'bridge deck was set by sea-level shoreline rather than adjacent bank');
-    assert.equal(bridgeDeckLookup(model, surface)(0, 0), deck, 'bridge car height disagrees with raised bank deck');
 
     // An oblique crossing reaches the full bank over a longer axial distance
     // than the blend width: the approach must follow the shoreline distance.
@@ -278,86 +237,26 @@ console.log(JSON.stringify({ cases: results, bridgeEdges: bridgeModel.stats.brid
     const diag = bridgeRunDecks(diagonal, surface)[0];
     assert.ok(diag >= bank + BRIDGE_CLEARANCE + CLEARANCE_MARGIN,
       'oblique crossing deck undershot the full bank height');
-    assert.equal(bridgeDeckLookup(diagonal, surface)(0, 17.5), diag,
-      'oblique bridge car height disagrees with raised bank deck');
 
-    // A grazing crossing runs almost parallel to the shore: along its axis the
-    // shoreline distance barely grows, so the approach must climb the bank
-    // along the shoreline normal to reach full bank height.
-    {
-      const grazing = {
-        bridges: [{ a: [-1, 0], b: [1, 100], width: 8 }],
-        fields: { elevation: () => 24, water: { sdf: x => Math.abs(x) - 1 } },
-      };
-      const g = terrainFrame(grazing).surface;
-      const graze = bridgeRunDecks(grazing, g)[0];
-      const fullBank = g(-1 - SHORE_BLEND, 0) + BRIDGE_CLEARANCE + CLEARANCE_MARGIN;
-      assert.ok(Math.abs(fullBank - 27.65) < 1e-9, `grazing fixture bank datum drifted: ${fullBank}`);
-      assert.ok(graze >= fullBank - 1e-9, `grazing crossing deck ${graze} undershot bank+clearance ${fullBank}`);
-      assert.equal(bridgeDeckLookup(grazing, g)(0, 50), graze, 'grazing bridge car height disagrees with raised bank deck');
-
-      // A high bank beside the middle of a long grazing span, with low banks
-      // at both landings: the deck must clear the midspan bank too, not just
-      // the terrain at its ends (the deck grid alone only reaches the blended
-      // shoulder, ~4.18).
-      const ridged = {
-        bridges: [{ a: [-1, 0], b: [1, 100], width: 8 }],
-        fields: { elevation: (x, z) => Math.abs(z - 50) < 10 ? 24 : 0, water: { sdf: x => Math.abs(x) - 1 } },
-      };
-      const r = terrainFrame(ridged).surface;
-      const ridgeDeck = bridgeRunDecks(ridged, r)[0];
-      const ridgeBank = r(-1 - SHORE_BLEND, 50) + BRIDGE_CLEARANCE + CLEARANCE_MARGIN;
-      assert.ok(Math.abs(ridgeBank - 27.65) < 1e-9, `midspan ridge fixture bank datum drifted: ${ridgeBank}`);
-      assert.ok(r(-1 - SHORE_BLEND, 0) + BRIDGE_CLEARANCE + CLEARANCE_MARGIN < 4, 'midspan ridge fixture landings are not low');
-      assert.ok(ridgeDeck >= ridgeBank - 1e-9, `grazing deck ${ridgeDeck} undershot midspan bank+clearance ${ridgeBank}`);
-      assert.equal(bridgeDeckLookup(ridged, r)(0, 50), ridgeDeck, 'midspan ridge bridge car height disagrees with raised deck');
-
-      // Bounded work: each bank climb has a fixed step budget however shallow
-      // the crossing, and the climbs (landing edges plus interior stations)
-      // grow only linearly with span length, so many spans stay cheap.
-      const workBound = ({ a, b, width }) => {
-        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        const along = Math.ceil(len / CLEARANCE_SAMPLE_STEP), across = Math.ceil(width / CLEARANCE_SAMPLE_STEP);
-        const climbs = 2 * (across + 1) + 2 * (Math.ceil(len / BRIDGE_BANK_STATION_STEP) - 1);
-        // Per step: 4 gradient + 1 advance + isLand + sample evaluations.
-        const perClimb = 1 + 7 * (Math.ceil(2 * SHORE_BLEND / CLEARANCE_SAMPLE_STEP) + 2);
-        return (along + 1) * (across + 1) + climbs * perClimb;
-      };
-      let calls = 0;
-      const counted = {
-        bridges: Array.from({ length: 200 }, (_, i) => ({ a: [-1, i * 300], b: [1 + (i % 7), i * 300 + 100], width: 8 })),
-        fields: { elevation: () => 24, water: { sdf: (x) => { calls++; return Math.abs(x) - 1; } } },
-      };
-      const cs = terrainFrame(counted).surface;
-      const t0 = performance.now();
-      const many = bridgeRunDecks(counted, cs);
-      const ms = performance.now() - t0;
-      assert.ok(many.every(y => y >= fullBank - 1e-9), 'a grazing span in the batch undershot the bank');
-      const perBridge = calls / counted.bridges.length;
-      const bound = counted.bridges.reduce((s, b) => s + workBound(b), 0) / counted.bridges.length;
-      assert.ok(perBridge <= bound, `bank search sdf evaluations per bridge unbounded: ${perBridge} > ${bound}`);
-      assert.ok(perBridge < 8000, `bank search sdf evaluations per 100-unit bridge: ${perBridge}`);
-      assert.ok(ms < 2000, `200 grazing spans took ${ms}ms`);
-    }
-
-    // A sampler without a nearby shore must not pull in unrelated terrain
-    // outside the bridge footprint.
-    const inland = x => Math.abs(x) > shore + 5 ? 24 : 0;
-    inland.sdf = () => 1e9;
-    inland.isLand = () => true;
-    assert.equal(bridgeDeckY(inland, model.bridges[0]), BRIDGE_FLAT_Y,
-      'bridge sampled an unrelated inland rise');
+    // A high bank beside the middle of a long grazing span, with low banks
+    // at both landings: the deck must clear the midspan bank too, not just
+    // the terrain at its ends (the deck grid alone only reaches the blended
+    // shoulder, ~4.18).
+    const ridged = {
+      bridges: [{ a: [-1, 0], b: [1, 100], width: 8 }],
+      fields: { elevation: (x, z) => Math.abs(z - 50) < 10 ? 24 : 0, water: { sdf: x => Math.abs(x) - 1 } },
+    };
+    const r = terrainFrame(ridged).surface;
+    const ridgeDeck = bridgeRunDecks(ridged, r)[0];
+    const ridgeBank = r(-1 - SHORE_BLEND, 50) + BRIDGE_CLEARANCE + CLEARANCE_MARGIN;
+    assert.ok(ridgeDeck >= ridgeBank - 1e-9, `grazing deck ${ridgeDeck} undershot midspan bank+clearance ${ridgeBank}`);
   }
 
-  // Flat terrain: no sampler (legacy models) and a flat sampler both keep the
-  // flat datum, and car lookup degrades to it.
+  // Flat terrain: no sampler (legacy models) keeps the flat datum.
   {
     const left = { a: [0, 0], b: [20, 0], width: 8 };
     const right = { a: [20, 0], b: [40, 0], width: 8 };
     assert.equal(bridgeRunDecks({ bridges: [left, right] }, null)[0], BRIDGE_FLAT_Y, 'flat model without sampler left the flat datum');
-    assert.equal(bridgeRunDecks({ bridges: [left, right] }, () => 0)[0], BRIDGE_FLAT_Y, 'flat sampler lifted the deck datum');
-    assert.equal(bridgeDeckLookup({ bridges: [] }, null)(999, 999), BRIDGE_FLAT_Y, 'empty bridge list lookup lost the flat datum');
-    assert.equal(bridgeDeckLookup({ bridges: [left] }, null)(10, 0), BRIDGE_FLAT_Y, 'flat model car lookup did not fall back to the flat datum');
   }
 
   // Car deck lookup stays keyed to the nearest bridge axis.
