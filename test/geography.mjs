@@ -1683,11 +1683,4 @@ assert.equal(JSON.stringify(generateCity(bspCompatConfig)), bspBeforeHybrid, 'BS
 assert.equal(JSON.stringify(generateCity(proceduralConfig)), JSON.stringify(proceduralAfter),
   'source-omitted procedural output changed after hybrid');
 
-console.log(JSON.stringify({
-  tests: 'geography',
-  projectedEastAtEquatorM: equator.project([1, 0])[0],
-  fixturePoints: projectedFixture.length,
-  clippedPieces: reentry.length,
-  geojsonRecords: normalized.records.length,
-  geojsonDiagnostics: mixedResult.diagnostics.length,
-}));
+console.log('geography: all tests passed');
